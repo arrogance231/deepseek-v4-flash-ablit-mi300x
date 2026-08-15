@@ -1,0 +1,11 @@
+--- a/vllm/models/deepseek_v4/amd/model.py
++++ b/patches/deepseek_v4_amd_model.router-bf16.py
+@@ -226,7 +226,7 @@
+             input_size=config.hidden_size,
+             output_size=config.n_routed_experts,
+             bias=False,
+-            out_dtype=torch.float32,
++            out_dtype=torch.bfloat16,
+             prefix=f"{prefix}.gate",
+         )
+ 

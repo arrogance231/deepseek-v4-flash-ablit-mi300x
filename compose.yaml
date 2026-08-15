@@ -15,7 +15,9 @@ services:
       - /dev/dri:/dev/dri
     environment:
       VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_OPUS_PREFILL: "1"
       VLLM_ROCM_USE_SKINNY_GEMM: "0"
+      ROCP_TOOL_ATTACH: "1"
       HSA_COREDUMP_PATTERN: /var/crash/vllm/gpucore.%p
       AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE: /opt/aiter-configs/dsv4-mi300x-a8w8-blockscale-bpreshuffle.csv
     volumes:
@@ -23,21 +25,32 @@ services:
       - ./aiter-cache:/root/.aiter
       - ./crash-dumps:/var/crash/vllm
       - ./vllm-entrypoint.sh:/opt/vllm-entrypoint.sh:ro
-      - ./tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.prefill-m2688.csv:/opt/aiter-configs/dsv4-mi300x-a8w8-blockscale-bpreshuffle.csv:ro
-      - ./tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.prefill-m2688.csv:/usr/local/lib/python3.12/dist-packages/aiter/configs/model_configs/dsv4_a8w8_blockscale_tuned_gemm.csv:ro
+      - ./tuning/dsv4-mi300x-a8w8-blockscale-bpreshuffle-ck.batch4096.csv:/opt/aiter-configs/dsv4-mi300x-a8w8-blockscale-bpreshuffle.csv:ro
+      - ./tuning/dsv4-a8w8-blockscale-tuned-gemm.mi300x.decode-candidate.csv:/usr/local/lib/python3.12/dist-packages/aiter/configs/model_configs/dsv4_a8w8_blockscale_tuned_gemm.csv:ro
       # Fix padded MXFP4 lanes misrouting tokens (doublewordai/vllm-amd-blog-doubleword@c32932bb9).
-      - ./patches/gpt_oss_triton_kernels_moe.pack128-fused-silu-fast-routing.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py:ro
+      - ./patches/gpt_oss_triton_kernels_moe.row-i8asym-candidate.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py:ro
+      - ./kernel-dev/hip-a8w4:/opt/cj-moe
+      - ./profiles-current:/profiles-current
       - ./patches/mxfp4.fused-silu.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/oracle/mxfp4.py:ro
+      - ./patches/activation.rocm-exact-swiglu.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/activation.py:ro
+      - ./patches/block_table.active-width-copy.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/block_table.py:ro
+      - ./patches/deepseek_v4_amd_model.router-bf16.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/amd/model.py:ro
       - ./patches/triton-kernels-matmul-ogs-opt-flags.dsv4-mi300x.py:/usr/local/lib/python3.12/dist-packages/vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags.py:ro
       - ./patches/fused_compress_quant_cache.fnuz-shuffle.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py:ro
+      - ./patches/cache_utils.gather2048.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/common/ops/cache_utils.py:ro
       - ./patches/aiter_pa_mqa_logits.i64.py:/usr/local/lib/python3.12/dist-packages/aiter/ops/triton/gluon/pa_mqa_logits.py:ro
-      - ./patches/rocm_aiter_mla_sparse.prefill-bh64.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:ro
+      - ./patches/rocm_aiter_mla_sparse.decode-h32-k16.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/rocm_aiter_mla_sparse.py:ro
+      - ./patches/_C_stable_libtorch.topk-tiebreak-sanitize.abi3.so:/usr/local/lib/python3.12/dist-packages/vllm/_C_stable_libtorch.abi3.so:ro
+      - ./patches/deepseek_v4_attention.wqb-bpreshuffle.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/attention.py:ro
+      - ./patches/deepseek_v4_rocm.wqb-bpreshuffle.py:/usr/local/lib/python3.12/dist-packages/vllm/models/deepseek_v4/amd/rocm.py:ro
       # vLLM 77469c9: keep speculative verify attention causal on ROCm small-head MLA.
       - ./patches/rocm_aiter_mla.dspark-causal.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla/rocm_aiter_mla.py:ro
       - ./patches/dspark-speculator.independent-draft-gumbel.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/dspark/speculator.py:ro
       - ./patches/spec-decode-utils.independent-draft-gumbel.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/worker/gpu/spec_decode/utils.py:ro
       # Fence native CPU KV transfers behind in-flight compute (vLLM #47282 / PR #47291).
       - ./patches/kv_offload_cpu_gpu_worker.load-war.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/kv_offload/cpu/gpu_worker.py:ro
+      # Use the full prefill quantum only when no other request can be delayed.
+      - ./patches/scheduler.contention-aware.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro
     entrypoint: [/opt/vllm-entrypoint.sh]
     command:
       - /root/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/7872f01b1d1fe23eabc4c98b48bffcef5a386062
@@ -63,9 +76,9 @@ services:
       - --block-size
       - "256"
       - --max-model-len
-      - "262144"
+      - "393216"
       - --kv-cache-memory-bytes
-      - "20000000000"
+      - "16000000000"
       - --kv-offloading-size
       - "96"
       - --kv-offloading-backend
@@ -73,7 +86,7 @@ services:
       - --max-num-seqs
       - "64"
       - --max-num-batched-tokens
-      - "2048"
+      - "4096"
       - --long-prefill-token-threshold
       - "1024"
       - --moe-backend
@@ -84,6 +97,15 @@ services:
       - --speculative-config.num-speculative-tokens=7
       - --speculative-config.draft-sample-method=probabilistic
       - --speculative-config.rejection-sample-method=block
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112,120,128,136,144,152,160,168,176,184,192,200,208,216,224,232,240,248,256,272,288,304,320,336,352,368,384,400,416,432,448,464,480,496,512,1664,2048,3072,3712],"max_cudagraph_capture_size":3712}'
+      - --profiler-config.profiler=torch
+      - --profiler-config.torch_profiler_dir=/profiles-current
+      - --profiler-config.torch_profiler_with_stack=false
+      - --profiler-config.torch_profiler_use_gzip=false
+      - --profiler-config.torch_profiler_record_shapes=true
+      - --profiler-config.ignore_frontend=true
+      - --profiler-config.detailed_trace_annotation=true
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8000/health]
       interval: 30s

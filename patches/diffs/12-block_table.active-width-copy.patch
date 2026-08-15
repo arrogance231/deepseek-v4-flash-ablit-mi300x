@@ -1,0 +1,15 @@
+--- a/vllm/v1/worker/block_table.py
++++ b/patches/block_table.active-width-copy.py
+@@ -211,7 +211,11 @@
+         )
+ 
+     def commit_block_table(self, num_reqs: int) -> None:
+-        self.block_table.copy_to_gpu(num_reqs)
++        width = int(self.num_blocks_per_row[:num_reqs].max(initial=0))
++        if width:
++            self.block_table.gpu[:num_reqs, :width].copy_(
++                self.block_table.cpu[:num_reqs, :width], non_blocking=True
++            )
+ 
+     def clear(self) -> None:
+         self.block_table.gpu.fill_(0)

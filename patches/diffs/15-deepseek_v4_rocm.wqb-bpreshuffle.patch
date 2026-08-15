@@ -1,0 +1,32 @@
+--- a/vllm/models/deepseek_v4/amd/rocm.py
++++ b/patches/deepseek_v4_rocm.wqb-bpreshuffle.py
+@@ -450,6 +450,7 @@
+         super().__init__(*args, **kwargs)
+         # Block scale for the preshuffled weight; None = not preshuffled.
+         self._wqa_wkv_scale: torch.Tensor | None = None
++        self._wq_b_scale: torch.Tensor | None = None
+         self._wo_b_scale: torch.Tensor | None = None
+ 
+     @classmethod
+@@ -487,6 +488,7 @@
+             return ws
+ 
+         self._wqa_wkv_scale = _prep(self.fused_wqa_wkv)
++        self._wq_b_scale = _prep(self.wq_b)
+         self._wo_b_scale = _prep(self.wo_b)
+ 
+     def _bpre_attn_gemm(
+@@ -513,6 +515,13 @@
+             )
+         return super()._fused_wqa_wkv_gemm(hidden_states)
+ 
++    def _wq_b_gemm(self, qr: torch.Tensor) -> torch.Tensor:
++        if self._wq_b_scale is not None and qr.dim() == 2:
++            return self._bpre_attn_gemm(
++                self.wq_b.weight, self._wq_b_scale, qr, False
++            )
++        return super()._wq_b_gemm(qr)
++
+     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
+         z = rocm_inv_rope_einsum(

@@ -1,0 +1,39 @@
+--- a/vllm/models/deepseek_v4/attention.py
++++ b/patches/deepseek_v4_attention.wqb-bpreshuffle.py
+@@ -400,6 +400,9 @@
+         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+         return qr_kv
+ 
++    def _wq_b_gemm(self, qr: torch.Tensor) -> torch.Tensor:
++        return self.wq_b(qr)
++
+     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
+         aux_streams = self.aux_stream_list
+         if aux_streams is not None:
+@@ -485,7 +488,7 @@
+             compressor = self.compressor
+ 
+             def wq_b_kv_insert() -> torch.Tensor:
+-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
++                q = self._wq_b_gemm(qr).view(-1, self.n_local_heads, self.head_dim)
+                 q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                 return q
+ 
+@@ -519,7 +522,7 @@
+             compressor = self.compressor
+ 
+             def wq_b_kv_insert() -> torch.Tensor:
+-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
++                q = self._wq_b_gemm(qr).view(-1, self.n_local_heads, self.head_dim)
+                 q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                 return q
+ 
+@@ -532,7 +535,7 @@
+             )
+         else:
+             # SWA-only layer: no compressor, no overlap.
+-            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
++            q = self._wq_b_gemm(qr).view(-1, self.n_local_heads, self.head_dim)
+             q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+ 
+         # MLA attention writes into the pre-allocated `out` buffer

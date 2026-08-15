@@ -1,0 +1,4 @@
+tuning/*.csv -text -diff -whitespace
+patches/*.patch -diff -whitespace
+kernel-dev/hip-a8w4/opus942/*.h -whitespace
+kernel-dev/hip-a8w4/opus942/*.hpp -whitespace

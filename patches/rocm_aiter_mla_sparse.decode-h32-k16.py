@@ -3,12 +3,14 @@
 import functools
 import importlib
 import math
+import os
 from importlib.util import find_spec
 
 import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from aiter.jit.core import compile_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
@@ -23,6 +25,27 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+_USE_OPUS_PREFILL = os.getenv("VLLM_ROCM_OPUS_PREFILL") == "1"
+
+
+@compile_ops(
+    "module_pa_sparse_prefill_opus942",
+    fc_name="pa_sparse_prefill_opus_fwd",
+    develop=True,
+)
+def _opus_sparse_prefill_fwd(
+    q: torch.Tensor,
+    unified_kv: torch.Tensor,
+    kv_indices_prefix: torch.Tensor,
+    kv_indptr_prefix: torch.Tensor,
+    kv: torch.Tensor,
+    kv_indices_extend: torch.Tensor,
+    kv_indptr_extend: torch.Tensor,
+    attn_sink: torch.Tensor,
+    out: torch.Tensor,
+    softmax_scale: float,
+) -> None: ...
 
 
 @triton.jit
@@ -442,7 +465,6 @@ def rocm_fp8_paged_mqa_logits(
                 KVBlockSize=block_size,
                 WavePerEU=2,
             )
-            out_logits.nan_to_num_(float("-inf"))
             return out_logits
         deepgemm_fp8_paged_mqa_logits_stage1 = (
             aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
@@ -573,11 +595,11 @@ def rocm_fp8_mqa_logits(
     # Remove this branch once vLLM bumps AITER to a version that includes
     # ROCm/aiter#3257.
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
-        from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
-            fp8_mqa_logits_gfx942,
+        from aiter.ops.flydsl.kernels.fp8_mqa_logits import (
+            flydsl_fp8_mqa_logits,
         )
 
-        return fp8_mqa_logits_gfx942(
+        return flydsl_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
 
@@ -609,6 +631,17 @@ def rocm_aiter_sparse_attn_indexer_fake(
     skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
+
+
+@triton.jit
+def _sort_topk_512_desc_kernel(indices, row_stride: tl.constexpr):
+    row = tl.program_id(0)
+    offsets = tl.arange(0, 512)
+    values = tl.load(indices + row * row_stride + offsets)
+    tl.store(
+        indices + row * row_stride + offsets,
+        tl.sort(values, dim=0, descending=True),
+    )
 
 
 @eager_break_during_capture
@@ -746,16 +779,17 @@ def rocm_aiter_sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            selected = min(topk_tokens, logits.shape[-1])
-            selected_indices = torch.topk(logits, selected, dim=-1).indices
-            selected_indices -= chunk.cu_seqlen_ks[:, None]
-            valid = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).clamp(max=selected)
-            selected_indices.masked_fill_(
-                torch.arange(selected, device=logits.device)[None] >= valid[:, None],
-                -1,
+            torch.ops._C.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                logits.shape[0],
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
             )
-            topk_indices.fill_(-1)
-            topk_indices[:, :selected].copy_(selected_indices)
+            topk_indices.copy_(topk_indices.sort(dim=-1, descending=True).values)
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -805,9 +839,11 @@ def rocm_aiter_sparse_attn_indexer(
             logits.stride(1),
             topk_tokens,
         )
-        # HIP returns the correct set in atomic append order. Canonicalize it
-        # before sparse attention makes reduction order observable.
-        topk_indices.copy_(topk_indices.sort(dim=-1, descending=True).values)
+        # Canonical order keeps sparse-attention reduction deterministic.
+        assert topk_indices.shape[-1] == 512
+        _sort_topk_512_desc_kernel[(topk_indices.numel() // 512,)](
+            topk_indices, topk_indices.stride(0), num_warps=16
+        )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
@@ -849,51 +885,47 @@ def _expand_2d_block_scales(
 
 @triton.jit
 def _inverse_rope_gptj_kernel(
-    o_ptr,  # [T, H, D] input
-    out_ptr,  # [T, H, D] bf16 output
+    o_ptr,  # [T, H, D] bf16 input/output
     pos_ptr,  # [T] positions
     cos_sin_ptr,  # [P, rope_dim] fp32 (cos[:half] | sin[half:])
     s_t,
     s_h,  # input row strides (last dim contiguous)
-    os_t,
-    os_h,  # output row strides
     cs_stride,  # cos_sin_cache row stride
-    NOPE: tl.constexpr,  # non-rope head dims (passed through)
+    NUM_HEADS: tl.constexpr,
+    NOPE: tl.constexpr,
     HALF: tl.constexpr,  # rope_dim // 2
-    BLOCK_NOPE: tl.constexpr,
+    BLOCK_H: tl.constexpr,
     BLOCK_HALF: tl.constexpr,
 ):
-    """Fused inverse GPT-J RoPE on the trailing rope_dim of each (token, head).
+    """Inverse GPT-J RoPE in place on the trailing dimensions of each head.
 
     Mirrors ``DeepseekV4ScalingRotaryEmbedding.forward_native(inverse=True)``
-    for the GPT-J (non-neox) layout, writing bf16 directly. Replaces the
-    clone + index_select + repeat_interleave + neg + stack + cat + cast chain
-    (~10 small kernels) with a single launch.
+    for the GPT-J (non-neox) layout. NoPE dimensions are already bf16 and do
+    not need the former full-tensor copy.
     """
     t = tl.program_id(0)
-    h = tl.program_id(1)
-    in_base = t * s_t + h * s_h
-    out_base = t * os_t + h * os_h
-
-    # NoPE lanes pass through unchanged (only cast to bf16).
-    n = tl.arange(0, BLOCK_NOPE)
-    nmask = n < NOPE
-    vals = tl.load(o_ptr + in_base + n, mask=nmask)
-    tl.store(out_ptr + out_base + n, vals.to(tl.bfloat16), mask=nmask)
+    h = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    hmask = h < NUM_HEADS
+    base = t * s_t + h[:, None] * s_h
 
     # RoPE lanes: out_even = a*cos + b*sin, out_odd = b*cos - a*sin
     # (a = even lane, b = odd lane; sin negated for the inverse rotation).
     pos = tl.load(pos_ptr + t).to(tl.int64)
     k = tl.arange(0, BLOCK_HALF)
     kmask = k < HALF
-    a = tl.load(o_ptr + in_base + NOPE + 2 * k, mask=kmask).to(tl.float32)
-    b = tl.load(o_ptr + in_base + NOPE + 2 * k + 1, mask=kmask).to(tl.float32)
+    mask = hmask[:, None] & kmask[None, :]
+    a = tl.load(o_ptr + base + NOPE + 2 * k[None, :], mask=mask).to(tl.float32)
+    b = tl.load(o_ptr + base + NOPE + 2 * k[None, :] + 1, mask=mask).to(tl.float32)
     cos = tl.load(cos_sin_ptr + pos * cs_stride + k, mask=kmask)
     sin = tl.load(cos_sin_ptr + pos * cs_stride + HALF + k, mask=kmask)
     out_even = a * cos + b * sin
     out_odd = b * cos - a * sin
-    tl.store(out_ptr + out_base + NOPE + 2 * k, out_even.to(tl.bfloat16), mask=kmask)
-    tl.store(out_ptr + out_base + NOPE + 2 * k + 1, out_odd.to(tl.bfloat16), mask=kmask)
+    tl.store(o_ptr + base + NOPE + 2 * k[None, :], out_even.to(tl.bfloat16), mask=mask)
+    tl.store(
+        o_ptr + base + NOPE + 2 * k[None, :] + 1,
+        out_odd.to(tl.bfloat16),
+        mask=mask,
+    )
 
 
 def _fused_inverse_rope_gptj(
@@ -902,7 +934,7 @@ def _fused_inverse_rope_gptj(
     cos_sin_cache: torch.Tensor,
     rope_head_dim: int,
 ) -> torch.Tensor:
-    """bf16 inverse GPT-J RoPE via a single fused Triton kernel."""
+    """Apply inverse GPT-J RoPE in place to a bf16 attention output."""
     assert o.dim() == 3 and o.stride(-1) == 1, (
         "_fused_inverse_rope_gptj expects a [T, H, D] input with a contiguous last dim"
     )
@@ -913,28 +945,26 @@ def _fused_inverse_rope_gptj(
         "_fused_inverse_rope_gptj expects cos_sin_cache laid out as "
         f"[P, {rope_head_dim}] = cos | sin, got {tuple(cos_sin_cache.shape)}"
     )
+    assert o.dtype == torch.bfloat16
     num_tokens, num_heads, head_dim = o.shape
-    out = torch.empty(
-        (num_tokens, num_heads, head_dim), dtype=torch.bfloat16, device=o.device
-    )
     if num_tokens == 0:
-        return out
-    _inverse_rope_gptj_kernel[(num_tokens, num_heads)](
+        return o
+    block_h = 4
+    _inverse_rope_gptj_kernel[(num_tokens, triton.cdiv(num_heads, block_h))](
         o,
-        out,
         positions,
         cos_sin_cache,
         o.stride(0),
         o.stride(1),
-        out.stride(0),
-        out.stride(1),
         cos_sin_cache.stride(0),
+        NUM_HEADS=num_heads,
         NOPE=head_dim - rope_head_dim,
         HALF=rope_head_dim // 2,
-        BLOCK_NOPE=triton.next_power_of_2(head_dim - rope_head_dim),
+        BLOCK_H=block_h,
         BLOCK_HALF=triton.next_power_of_2(rope_head_dim // 2),
+        num_warps=4,
     )
-    return out
+    return o
 
 
 def _get_cached_wo_a_bf16(
@@ -997,7 +1027,17 @@ def rocm_inv_rope_einsum(
         wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
     )
 
-    return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
+    out = torch.empty(
+        (o_ref.shape[0], n_local_groups, o_lora_rank),
+        dtype=o_ref.dtype,
+        device=o_ref.device,
+    )
+    torch.bmm(
+        o_ref.transpose(0, 1),
+        wo_a_weight.transpose(1, 2),
+        out=out.transpose(0, 1),
+    )
+    return out
 
 
 _DSV4_SPARSE_NOPE_DIM = 448
@@ -1811,6 +1851,7 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[sq,h,d], got {q.shape}"
     assert kv.ndim == 2, f"expected kv=[skv,d], got {kv.shape}"
@@ -1841,7 +1882,30 @@ def _rocm_sparse_attn_prefill_ragged_triton(
     block_d = triton.next_power_of_2(head_dim)
     block_k = 16 if head_dim >= 256 else 32
     num_warps = 4
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    if out is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
+    assert out.shape == q.shape and out.dtype == torch.bfloat16
+    if (
+        _USE_OPUS_PREFILL
+        and _ON_GFX942
+        and has_attn_sink
+        and q.dtype == torch.bfloat16
+        and num_heads == 64
+        and head_dim == 512
+    ):
+        _opus_sparse_prefill_fwd(
+            q,
+            kv,
+            indices,
+            indptr,
+            kv[:0],
+            indices[:0],
+            indptr,
+            attn_sink,
+            out,
+            float(scale),
+        )
+        return out
     _sparse_attn_prefill_ragged_kernel[(num_queries, triton.cdiv(num_heads, block_h))](
         q,
         kv,
@@ -1866,6 +1930,8 @@ def _rocm_sparse_attn_prefill_ragged_triton(
         BLOCK_D=block_d,
         BLOCK_K=block_k,
         num_warps=num_warps,
+        num_stages=1,
+        waves_per_eu=1,
     )
     return out
 
@@ -1879,6 +1945,7 @@ def _rocm_sparse_attn_prefill_triton(
     nope_head_dim: int,
     rope_head_dim: int,
     topk_length: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     ragged_indices, ragged_indptr = build_ragged_indices_from_dense(
         indices,
@@ -1896,6 +1963,7 @@ def _rocm_sparse_attn_prefill_triton(
         attn_sink=attn_sink,
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
+        out=out,
     )
 
 
@@ -2006,6 +2074,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     extra_cache: torch.Tensor | None = None,
     extra_indices: torch.Tensor | None = None,
     extra_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert q.ndim == 3, f"expected q=[b,h,d], got {q.shape}"
     assert main_cache.ndim == 3, (
@@ -2066,8 +2135,11 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indices = torch.empty(0, device=q.device, dtype=torch.int32)
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
-    block_h = 16
-    out = torch.empty_like(q, dtype=torch.bfloat16)
+    block_h = 32
+    if out is None:
+        out = torch.empty_like(q, dtype=torch.bfloat16)
+    else:
+        assert out.shape == q.shape and out.dtype == torch.bfloat16
     heads_blocks = triton.cdiv(num_heads, block_h)
     nope_block = triton.next_power_of_2(nope_head_dim)
     comb_dim = nope_head_dim + rope_head_dim
@@ -2110,7 +2182,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    block_k = 16  # Tuned for gfx942 decode; two 32-head workgroups halve KV reloads.
     # Average per-query segment lengths, read sync-free from the ragged index
     # sizes, let the split heuristic avoid over-splitting
     # main_indices/extra_indices are flat [nnz] int32.
@@ -2214,6 +2286,7 @@ def _rocm_sparse_attn_decode_triton(
     main_ragged_indptr: torch.Tensor | None = None,
     extra_ragged_indices: torch.Tensor | None = None,
     extra_ragged_indptr: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if main_ragged_indices is None or main_ragged_indptr is None:
         main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
@@ -2249,6 +2322,7 @@ def _rocm_sparse_attn_decode_triton(
         extra_cache=extra_cache,
         extra_indices=extra_ragged_indices,
         extra_indptr=extra_ragged_indptr,
+        out=out,
     )
 
 
@@ -2285,6 +2359,7 @@ def rocm_sparse_attn_prefill(
             attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
+            out=output,
         )
     else:
         indices_2d = indices.reshape(indices.shape[0], -1)
@@ -2297,8 +2372,9 @@ def rocm_sparse_attn_prefill(
             nope_head_dim=nope_head_dim,
             rope_head_dim=rope_head_dim,
             topk_length=topk_length,
+            out=output,
         )
-    output.copy_(output_chunk.to(output.dtype))
+    assert output_chunk is output
 
 
 def rocm_sparse_attn_decode(
@@ -2365,5 +2441,6 @@ def rocm_sparse_attn_decode(
         main_ragged_indptr=swa_ragged_indptr,
         extra_ragged_indices=topk_ragged_indices,
         extra_ragged_indptr=topk_ragged_indptr,
+        out=output,
     )
-    output.copy_(attn_out.to(output.dtype))
+    assert attn_out is output

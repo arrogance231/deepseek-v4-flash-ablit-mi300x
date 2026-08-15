@@ -1,6 +1,119 @@
 --- a/vllm/model_executor/layers/fused_moe/experts/gpt_oss_triton_kernels_moe.py
-+++ b/gpt_oss_triton_kernels_moe.pack128-fused-silu-fast-routing.py
-@@ -120,7 +120,7 @@
++++ b/patches/gpt_oss_triton_kernels_moe.row-i8asym-candidate.py
+@@ -1,6 +1,8 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
++import os
++
+ import torch
+ 
+ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+@@ -32,6 +34,103 @@
+ 
+ logger = init_logger(__name__)
+ 
++_cj_ext = None
++_cj_schedule = None
++
++
++def _cj_extensions():
++    global _cj_ext
++    if _cj_ext is None:
++        os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
++        from torch.utils.cpp_extension import load
++
++        root = "/opt/cj-moe"
++        flags = ["-O3", "--offload-arch=gfx942"]
++        _cj_ext = tuple(
++            load(name, [f"{root}/{cpp}.cpp", f"{root}/{hip}.hip"],
++                 extra_cuda_cflags=flags)
++            for name, cpp, hip in (
++                ("cj_row_i8asym64", "quanti8asym", "quanti8asym_dscale"),
++                ("cj_moe_schedule64", "schedule", "schedule"),
++                ("cj_fused_i8asym_w1_64", "fusedi8asym64", "fusedi8asym64ragged_activea"),
++                ("cj_fused_w2", "w2", "w2"))
++        )
++    return _cj_ext
++
++
++def _cj_repack(w, precision, first, prepare=None):
++    if hasattr(w, "_cj_q"):
++        return w._cj_q, w._cj_scale, w._cj_sum
++    q = w.storage.data.transpose(-2, -1).view(torch.uint8)
++    scale_obj = precision.weight_scale
++    scale = scale_obj.storage.data.transpose(-2, -1).view(torch.uint8)
++    e, n, kh = q.shape
++    k = kh * 2
++    if first:
++        q = q.view(e, n // 32, 16, 2, kh).transpose(2, 3).reshape(e, n, kh)
++        scale = scale.view(e, n // 32, 16, 2, k // 32).transpose(2, 3).reshape(e, n, k // 32)
++        weight_sum = torch.empty((e, n), dtype=torch.int32, device=q.device)
++        prepare(q, scale, weight_sum)
++        z = q.view(e, n, k // 8, 4)
++        z = torch.stack(((z[..., 0] & 15) | ((z[..., 2] & 15) << 4),
++                         (z[..., 0] >> 4) | (z[..., 2] & 240),
++                         (z[..., 1] & 15) | ((z[..., 3] & 15) << 4),
++                         (z[..., 1] >> 4) | (z[..., 3] & 240)), -1)
++        z = z.view(e, n // 16, 16, k // 128, 4, 4, 4)
++        packed = z.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view_as(q)
++    else:
++        weight_sum = None
++        z = torch.stack((q & 15, q >> 4), -1).flatten(-2)
++        z = z.view(e, n // 16, 16, k // 128, 4, 2, 4, 4)
++        z = z[:, :, :, :, :, 0] | (z[:, :, :, :, :, 1] << 4)
++        packed = z.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view_as(q)
++    scale = scale.view(e, n // 16, 16, k // 128, 4).permute(0, 1, 3, 2, 4).contiguous()
++    if not first:
++        scale.sub_(127).mul_(4)
++    w.storage.data = packed
++    scale_obj.storage.data = scale
++    w._cj_q, w._cj_scale, w._cj_sum = packed, scale, weight_sum
++    return packed, scale, weight_sum
++
++
++def _cj_moe(output, hidden, w1, w2, routing, gather, workspace13,
++            workspace2, quant_config):
++    global _cj_schedule
++    qmod, smod, w1mod, w2mod = _cj_extensions()
++    q1, s1, wsum = _cj_repack(w1, quant_config.w1_precision, True, qmod.prepare)
++    q2, s2, _ = _cj_repack(w2, quant_config.w2_precision, False)
++    m, k = hidden.shape
++    total = gather.src_indx.numel()
++    scratch = workspace13.view(torch.uint8).flatten()
++    hi = scratch[:m * k].view(m, k)
++    lo = scratch[m * k:2 * m * k].view(m, k)
++    scale = scratch[2 * m * k:2 * m * k + 4 * m].view(torch.float32)
++    intermediate = workspace2.view(torch.float16).view(total, 2048)
++    routed = workspace13.view(torch.float16).view(total, k)
++    hist = routing.expt_data.slice_sizes
++    offsets = routing.expt_data.slice_offs
++    tiny = m <= 64
++    if tiny:
++        schedule16 = routing.expt_data.block_schedule(16)
++        schedule48 = schedule64 = schedule16
++    else:
++        if _cj_schedule is None:
++            max_routes = m * 6
++            capacity = min(max_routes, 256) + max_routes // 16
++            _cj_schedule = torch.empty(
++                (3, capacity), dtype=torch.int32, device=hidden.device
++            )
++        schedule16 = _cj_schedule[0, :min(total, 256) + total // 16]
++        schedule48 = _cj_schedule[1, :min(total, 256) + total // 48]
++        schedule64 = _cj_schedule[2, :min(total, 256) + total // 64]
++        smod.run(schedule16, schedule48, schedule64, hist, False)
++    qmod.run(hi, lo, scale, hidden)
++    w1mod.run(intermediate, hi, scale, lo.view(torch.int32), q1, s1,
++              wsum, hist, offsets, gather.src_indx, schedule64, schedule16,
++              tiny, quant_config.gemm1_clamp_limit)
++    w2mod.run(output, routed, intermediate, q2, hist, offsets, schedule48,
++              gather.src_indx, routing.gate_scal, schedule48, schedule16, s2, tiny)
++
+ 
+ def _triton_kernel_moe_supports_current_device() -> bool:
+     # Shared device gate for the OAI Triton MoE expert classes.
+@@ -120,7 +219,7 @@
          # below without producing any output.
          offs_local = tl.arange(0, BLOCK_SIZE_PADDED)
          offs_global = pid_m * BLOCK_SIZE + offs_local
@@ -9,7 +122,7 @@
          col_indx = tl.load(NonzeroIndx + offs_global, mask=mask, other=-1).to(tl.uint32)
          kv_pairs = ((col_indx << 16) | offs_local).to(tl.uint32)
          kv_pairs = tl.sort(kv_pairs, 0)
-@@ -474,6 +474,9 @@
+@@ -474,6 +573,9 @@
                  SparseMatrix,
                  make_ragged_tensor_metadata,
              )
@@ -19,7 +132,7 @@
          except ImportError:
              # TODO(mgoin): drop the v3.5.1 pin and remove this fallback once
              # the gpt-oss perf regression in v3.6.0+ is resolved upstream.
-@@ -626,6 +629,16 @@
+@@ -626,6 +728,16 @@
      )
  
  
@@ -36,7 +149,7 @@
  # This is a triton implementation of the fused_experts function
  def triton_kernel_fused_experts(
      output_tensor: torch.Tensor,
-@@ -647,9 +660,7 @@
+@@ -647,9 +759,7 @@
      a1q_scale: torch.Tensor | None = None,
  ) -> torch.Tensor:
      """Triton implementation of fused expert computation using OAI kernels."""
@@ -47,7 +160,7 @@
      assert quant_config is not None
  
      # type check, uint8 means mxfp4
-@@ -682,8 +693,12 @@
+@@ -682,8 +792,12 @@
      )
      output_tensor = _resize_cache(output_tensor, (batch_dim, M, K))
  
@@ -62,7 +175,7 @@
              FnSpecs(
                  "swiglu",
                  triton_kernels.swiglu.swiglu_fn,
-@@ -692,13 +707,12 @@
+@@ -692,13 +806,12 @@
              ),
              (swiglu_alpha, swiglu_limit),
          )
@@ -78,7 +191,7 @@
      gammas = routing_data.gate_scal if routing_data else None
  
      matmul_ogs(
-@@ -727,21 +741,143 @@
+@@ -727,21 +840,143 @@
      return output_tensor
  
  
@@ -226,7 +339,7 @@
          (n_rows, bm_cols), dtype=torch.uint32, device=topk_ids.device
      )
  
-@@ -965,7 +1101,7 @@
+@@ -965,7 +1200,7 @@
  
      @staticmethod
      def _supports_activation(activation: MoEActivation) -> bool:
@@ -235,7 +348,35 @@
  
      @staticmethod
      def activation_format() -> mk.FusedMoEActivationFormat:
-@@ -1324,7 +1460,7 @@
+@@ -984,7 +1219,7 @@
+     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+         # workspace are allocated inside the kernel
+         activation_out_dim = self.adjust_N_for_activation(N, activation)
+-        workspace1 = (0, 0)
++        workspace1 = (M * topk, K)
+         workspace2 = (M * topk, activation_out_dim)
+         output = (M, K)
+         return (workspace1, workspace2, output)
+@@ -1024,6 +1259,18 @@
+         )
+ 
+         topk = topk_ids.size(1)
++        if (
++            current_platform.is_rocm()
++            and local_num_experts == 256
++            and hidden_states.shape[1] == 4096
++            and w1.shape[-1] == 4096
++            and w2.shape[-1] == 4096
++            and topk == 6
++            and activation == MoEActivation.SILU
++        ):
++            _cj_moe(output, hidden_states, w1, w2, routing_data, gather_indx,
++                    workspace13, workspace2, self.quant_config)
++            return
+         triton_kernel_fused_experts(
+             output,
+             hidden_states,
+@@ -1324,7 +1571,7 @@
  
      @staticmethod
      def _supports_activation(activation: MoEActivation) -> bool:

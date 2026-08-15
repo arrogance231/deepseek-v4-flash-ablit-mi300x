@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -31,6 +33,103 @@ from vllm.utils.import_utils import has_triton_kernels
 from ..utils import swiglu_limit_func
 
 logger = init_logger(__name__)
+
+_cj_ext = None
+_cj_schedule = None
+
+
+def _cj_extensions():
+    global _cj_ext
+    if _cj_ext is None:
+        os.environ["PYTORCH_ROCM_ARCH"] = "gfx942"
+        from torch.utils.cpp_extension import load
+
+        root = "/opt/cj-moe"
+        flags = ["-O3", "--offload-arch=gfx942"]
+        _cj_ext = tuple(
+            load(name, [f"{root}/{cpp}.cpp", f"{root}/{hip}.hip"],
+                 extra_cuda_cflags=flags)
+            for name, cpp, hip in (
+                ("cj_row_i8asym64", "quanti8asym", "quanti8asym_dscale"),
+                ("cj_moe_schedule64", "schedule", "schedule"),
+                ("cj_fused_i8asym_w1_64", "fusedi8asym64", "fusedi8asym64ragged_activea"),
+                ("cj_fused_w2", "w2", "w2"))
+        )
+    return _cj_ext
+
+
+def _cj_repack(w, precision, first, prepare=None):
+    if hasattr(w, "_cj_q"):
+        return w._cj_q, w._cj_scale, w._cj_sum
+    q = w.storage.data.transpose(-2, -1).view(torch.uint8)
+    scale_obj = precision.weight_scale
+    scale = scale_obj.storage.data.transpose(-2, -1).view(torch.uint8)
+    e, n, kh = q.shape
+    k = kh * 2
+    if first:
+        q = q.view(e, n // 32, 16, 2, kh).transpose(2, 3).reshape(e, n, kh)
+        scale = scale.view(e, n // 32, 16, 2, k // 32).transpose(2, 3).reshape(e, n, k // 32)
+        weight_sum = torch.empty((e, n), dtype=torch.int32, device=q.device)
+        prepare(q, scale, weight_sum)
+        z = q.view(e, n, k // 8, 4)
+        z = torch.stack(((z[..., 0] & 15) | ((z[..., 2] & 15) << 4),
+                         (z[..., 0] >> 4) | (z[..., 2] & 240),
+                         (z[..., 1] & 15) | ((z[..., 3] & 15) << 4),
+                         (z[..., 1] >> 4) | (z[..., 3] & 240)), -1)
+        z = z.view(e, n // 16, 16, k // 128, 4, 4, 4)
+        packed = z.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view_as(q)
+    else:
+        weight_sum = None
+        z = torch.stack((q & 15, q >> 4), -1).flatten(-2)
+        z = z.view(e, n // 16, 16, k // 128, 4, 2, 4, 4)
+        z = z[:, :, :, :, :, 0] | (z[:, :, :, :, :, 1] << 4)
+        packed = z.permute(0, 1, 3, 5, 2, 4, 6).contiguous().view_as(q)
+    scale = scale.view(e, n // 16, 16, k // 128, 4).permute(0, 1, 3, 2, 4).contiguous()
+    if not first:
+        scale.sub_(127).mul_(4)
+    w.storage.data = packed
+    scale_obj.storage.data = scale
+    w._cj_q, w._cj_scale, w._cj_sum = packed, scale, weight_sum
+    return packed, scale, weight_sum
+
+
+def _cj_moe(output, hidden, w1, w2, routing, gather, workspace13,
+            workspace2, quant_config):
+    global _cj_schedule
+    qmod, smod, w1mod, w2mod = _cj_extensions()
+    q1, s1, wsum = _cj_repack(w1, quant_config.w1_precision, True, qmod.prepare)
+    q2, s2, _ = _cj_repack(w2, quant_config.w2_precision, False)
+    m, k = hidden.shape
+    total = gather.src_indx.numel()
+    scratch = workspace13.view(torch.uint8).flatten()
+    hi = scratch[:m * k].view(m, k)
+    lo = scratch[m * k:2 * m * k].view(m, k)
+    scale = scratch[2 * m * k:2 * m * k + 4 * m].view(torch.float32)
+    intermediate = workspace2.view(torch.float16).view(total, 2048)
+    routed = workspace13.view(torch.float16).view(total, k)
+    hist = routing.expt_data.slice_sizes
+    offsets = routing.expt_data.slice_offs
+    tiny = m <= 64
+    if tiny:
+        schedule16 = routing.expt_data.block_schedule(16)
+        schedule48 = schedule64 = schedule16
+    else:
+        if _cj_schedule is None:
+            max_routes = m * 6
+            capacity = min(max_routes, 256) + max_routes // 16
+            _cj_schedule = torch.empty(
+                (3, capacity), dtype=torch.int32, device=hidden.device
+            )
+        schedule16 = _cj_schedule[0, :min(total, 256) + total // 16]
+        schedule48 = _cj_schedule[1, :min(total, 256) + total // 48]
+        schedule64 = _cj_schedule[2, :min(total, 256) + total // 64]
+        smod.run(schedule16, schedule48, schedule64, hist, False)
+    qmod.run(hi, lo, scale, hidden)
+    w1mod.run(intermediate, hi, scale, lo.view(torch.int32), q1, s1,
+              wsum, hist, offsets, gather.src_indx, schedule64, schedule16,
+              tiny, quant_config.gemm1_clamp_limit)
+    w2mod.run(output, routed, intermediate, q2, hist, offsets, schedule48,
+              gather.src_indx, routing.gate_scal, schedule48, schedule16, s2, tiny)
 
 
 def _triton_kernel_moe_supports_current_device() -> bool:
@@ -1120,7 +1219,7 @@ class OAITritonExperts(BaseOAITritonExperts):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace1 = (0, 0)
+        workspace1 = (M * topk, K)
         workspace2 = (M * topk, activation_out_dim)
         output = (M, K)
         return (workspace1, workspace2, output)
@@ -1160,6 +1259,18 @@ class OAITritonExperts(BaseOAITritonExperts):
         )
 
         topk = topk_ids.size(1)
+        if (
+            current_platform.is_rocm()
+            and local_num_experts == 256
+            and hidden_states.shape[1] == 4096
+            and w1.shape[-1] == 4096
+            and w2.shape[-1] == 4096
+            and topk == 6
+            and activation == MoEActivation.SILU
+        ):
+            _cj_moe(output, hidden_states, w1, w2, routing_data, gather_indx,
+                    workspace13, workspace2, self.quant_config)
+            return
         triton_kernel_fused_experts(
             output,
             hidden_states,

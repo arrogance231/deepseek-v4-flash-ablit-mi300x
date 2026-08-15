@@ -1,19 +1,20 @@
 # DeepSeek V4 Flash on a single AMD MI300X
 
-This repository contains the configuration and patches I use to run [`deepseek-ai/DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) on **one AMD MI300X** in production. It includes the Docker Compose stack, SHA-256-pinned file overlays, reference diffs against upstream, and tuning tables. The checkpoint runs as shipped, without additional weight quantization or offload.
+This repository contains the configuration and patches I use to run [`deepseek-ai/DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) on **one AMD MI300X** in production. It includes the Docker Compose stack, SHA-256-pinned file overlays, reference diffs against upstream, the JIT-compiled gfx942 kernel sources, and tuning tables. The checkpoint runs as shipped, without additional weight quantization or offload.
 
 Results from the pinned stack (vLLM ROCm nightly `0.26.1rc1.dev229+g124154a88.rocm723`, AITER `0.1.19`):
 
 | Metric | Result |
 | --- | ---: |
-| Single-stream decode (median per-stream, DSpark-7) | **168.6 tok/s** |
-| Prefill with tuned kernels | **≈ 7.9–8.5K tok/s** (6,988–7,019 tok/s on fresh prompts in the shipping profile) |
-| 8 concurrent streams | 542 tok/s aggregate, 90.3 tok/s median per stream |
-| 64-stream burst | 830 tok/s aggregate, no OOM, no engine errors |
-| Context | 256K validated (the architecture supports 1M) |
+| Uncached C1 prefill | **11.69K tok/s** steady (11.53K median; 2.19× the original 5.26K) |
+| Single-stream decode, static DSpark-7 | 152.6 tok/s aggregate, **158.8 tok/s median per stream** |
+| Native (non-speculative) C1 decode | 67.3 tok/s aggregate |
+| 64-stream burst | 1,278 tok/s aggregate (K7), no OOM, no engine errors |
+| Context | 384K validated (393,216 tokens; the architecture supports 1M) |
+| GPU KV pool | 16 GB `fp8_ds_mla` (1.95M-token length-equivalent) + 96 GiB native CPU tier |
 | Weights in HBM | 156.67 GiB — **no additional quantization or weight offload** |
 
-The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the model reliably on MI300X required fixes for its FP8 format, MoE routing at high concurrency, causal speculative verification, CPU-KV synchronization, and several untuned kernel shapes. This repository collects those fixes and pins the versions used in production.
+The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the model reliably on MI300X required fixes for its FP8 format, MoE routing at high concurrency, the checkpoint's expert-activation clamps, causal speculative verification, CPU-KV synchronization, and a long campaign of prefill and decode kernel tuning. This repository collects those fixes, pins the versions used in production, and documents the tuning journey in dated reports (see [Tuning reports](#tuning-reports)).
 
 ---
 
@@ -22,7 +23,7 @@ The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the mode
 The MI300X has **192 GB of HBM3** and 5.3 TB/s of memory bandwidth, with 2.4× the HBM capacity of an H100 SXM5 ([AMD](https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html)). [Doubleword's write-up](https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/) estimates that it costs roughly half as much at list price. For this 304B-parameter checkpoint, the memory capacity allows a simple single-GPU deployment:
 
 - The entire model fits in HBM without PCIe weight streaming or layer offload.
-- There is room for a 20 GB GPU KV pool and a 96 GiB CPU tier for evicted prefix-cache entries.
+- There is room for a 16 GB GPU KV pool and a 96 GiB CPU tier for evicted prefix-cache entries.
 - One card handles 2–8 typical concurrent streams and bursts of up to 64 streams.
 
 MI300X (CDNA3) implements the AMD/Graphcore `fnuz` variant of E4M3, while MI325X and newer use OCP-standard FP8 ([background](https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/)). A kernel that assumes OCP semantics on MI300X can be wrong by a factor of two in the scale domain. Correctness on this FP8 implementation was the first priority; performance tuning came afterward.
@@ -33,25 +34,30 @@ MI300X (CDNA3) implements the AMD/Graphcore `fnuz` variant of E4M3, while MI325X
 
 This repository adds:
 
-1. **Correctness overlays** for the pinned ROCm nightly, including fixes not yet in upstream vLLM.
-2. **A validated serving configuration** with probabilistic DSpark drafting, block rejection, and static K=7. It uses a 2,048-token scheduler budget and a 1,024-token long-prefill cap to prevent a cold prompt from stalling other streams.
-3. **AITER GEMM tuning tables** for the recurring `gfx942` shapes the packaged tables were missing, plus a `gfx942` OGS geometry override for the MXFP4 experts.
-4. **A hybrid KV strategy**: 20 GB of `fp8_ds_mla` GPU cache + 96 GiB native CPU offload, with a load-path fencing fix that upstream [issue #47282](https://github.com/vllm-project/vllm/issues/47282) documents but [PR #47291](https://github.com/vllm-project/vllm/pull/47291) never merged.
+1. **Correctness overlays** for the pinned ROCm nightly, including fixes not yet in upstream vLLM: the MXFP4 padded-lane routing fix, FNUZ FP8 indexer bytes, 64-bit paged-MQA offsets, deterministic sparse top-k, causal DSpark verification, and the restored DeepSeek expert-activation clamps.
+2. **A validated serving configuration** with probabilistic DSpark drafting, block rejection, and static K=7. A contention-aware scheduler gives a lone prefill the full 3,712-token quantum but caps long prefills at 1,024 tokens when other requests could be delayed.
+3. **Custom gfx942 kernels** (JIT-compiled at first start): row-asymmetric INT8 MoE W1/W2 with adaptive BM16/BM64+BM48 tiles and N-split low-concurrency variants, an exact BF16 SwiGLU+clamp kernel, an OPUS sparse-prefill kernel, and AITER GEMM tuning tables for the recurring `gfx942` shapes the packaged tables were missing.
+4. **A hybrid KV strategy**: 16 GB of `fp8_ds_mla` GPU cache + 96 GiB native CPU offload, with a load-path fencing fix that upstream [issue #47282](https://github.com/vllm-project/vllm/issues/47282) documents but [PR #47291](https://github.com/vllm-project/vllm/pull/47291) never merged.
 
 ## Repository layout
 
 ```text
 .
 ├── compose.yaml         # The production stack (vLLM ROCm + Caddy), digest-pinned
-├── Caddyfile.example    # Copy to Caddyfile; set hostname, email, and source CIDR
-├── vllm-entrypoint.sh   # Removes stale CPU-KV mmaps from /dev/shm before start
-├── SHA256SUMS           # SHA-256 pins for every runtime artifact
+├── Caddyfile.example   # Copy to Caddyfile; set hostname, email, and source CIDR
+├── vllm-entrypoint.sh  # Cleans stale CPU-KV mmaps, stages the OPUS module
+├── prepare-artifacts.sh # Expands the compiled libtorch extension (SHA-256 verified)
+├── SHA256SUMS          # SHA-256 pins for every runtime artifact
+├── artifacts/          # Compressed validated stable-libtorch top-k extension
 ├── patches/
-│   ├── *.py            # Byte-for-byte production overlays (mounted read-only)
-│   ├── diffs/*.patch   # Unified diffs vs. the upstream base revision
-│   └── README.md       # Provenance and regeneration instructions
-└── tuning/
-    └── *.csv           # AITER A8W8 blockscale tuning tables for gfx942
+│   ├── *.py           # Byte-for-byte production overlays (mounted read-only)
+│   ├── *.cu, *.patch # Top-k extension source and its diff vs. the pinned image
+│   ├── diffs/*.patch # Unified diffs vs. the upstream base revision
+│   └── README.md     # Provenance and regeneration instructions
+├── kernel-dev/hip-a8w4/  # gfx942 MoE/OPUS/SwiGLU HIP sources JIT-built at start
+├── tuning/
+│   └── *.csv        # AITER A8W8 blockscale tuning tables for gfx942
+└── *.md             # Dated tuning and correctness reports (see below)
 ```
 
 ## Runtime configuration
@@ -59,10 +65,11 @@ This repository adds:
 The stack uses a digest-pinned official vLLM ROCm nightly with:
 
 - `--trust-remote-code` and the DeepSeek V4 tokenizer, reasoning, and tool parsers
-- `fp8_ds_mla` KV cache (UE8M0 block-scaled FP8, not generic unscaled FP8) with 256-token blocks
-- `VLLM_ROCM_USE_AITER=1` and `--moe-backend triton`; Triton OGS handles the grouped MXFP4 experts, while AITER handles attention and dense linear layers
+- `fp8_ds_mla` KV cache (UE8M0 block-scaled FP8, not generic unscaled FP8) with 256-token blocks, 16 GB GPU pool, and a 96 GiB `native` CPU offload tier
+- `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_OPUS_PREFILL=1`, and `--moe-backend triton`; AITER handles attention and dense linears, and the 256-expert/top-6 MoE shape dispatches to the custom gfx942 W1/W2 kernels with grouped Triton OGS as fallback
 - DSpark-7 speculative decoding with probabilistic drafting and block rejection
-- full/breakable CUDA graph capture, giving one graph launch per token during steady decode
+- A 4,096-token scheduler budget (384 tokens reserved for DSpark, so ordinary prefills use up to 3,712) with the contention-aware long-prefill cap
+- full/breakable CUDA graph capture through M=3,712, giving one graph launch per token during steady decode
 - Caddy as an IP-allowlisted HTTPS proxy
 
 ## Deploying it
@@ -88,9 +95,10 @@ docker run --rm --entrypoint hf \
 
 ```bash
 cp Caddyfile.example Caddyfile   # then set your hostname, email, and remote_ip CIDR
-mkdir -p aiter-cache crash-dumps
-chmod +x vllm-entrypoint.sh
-sha256sum -c SHA256SUMS        # verify the overlays before first start
+mkdir -p aiter-cache crash-dumps profiles-current
+chmod +x vllm-entrypoint.sh prepare-artifacts.sh
+./prepare-artifacts.sh           # expands patches/_C_stable_libtorch.*.abi3.so
+sha256sum -c SHA256SUMS        # verify every artifact before first start
 ```
 
 ### 4. Start
@@ -101,19 +109,20 @@ docker compose up -d
 docker compose logs -f inference
 ```
 
-A healthy start takes ~5 minutes and must show all of:
+The first start JIT-compiles the gfx942 kernels and captures the graph set, so allow about ten minutes. A healthy start must show all of:
 
 ```text
 Model loading took 156.67 GiB
 DSpark draft model loaded: 96 params
-GPU KV cache size: 1,927,444 tokens
-Maximum concurrency for 262,144 tokens per request: 7.35x
+GPU KV cache size: 1,945,846 tokens
+Maximum concurrency for 393,216 tokens per request: 4.95x
 Created mmap file /dev/shm/vllm_offload_...mmap (103.08 GB)
 Capturing CUDA graphs (FULL)
+Graph capturing finished ... took 6.47 GiB
 Application startup complete
 ```
 
-After graph capture, run `rocm-smi --showmeminfo vram`. The warmed high-water mark is ~204.5 GB of 205.8 GB. If only a few hundred MB remain, the server may start but fail on the first request.
+After graph capture, run `rocm-smi --showmeminfo vram`. The validated high-water is ~199.9 GB of 205.8 GB after long-context and C64 gates; if only a few hundred MB remain, the server may start but fail on the first request.
 
 ### 5. Smoke-test
 
@@ -129,84 +138,89 @@ curl -sS "https://$HOST/v1/completions" \
 
 ## The patches
 
-Each `patches/*.py` file is a **full-file overlay** mounted read-only over its counterpart in the container; `compose.yaml` contains the target paths. The corresponding `diffs/*.patch` records the change from its upstream base. The base image remains digest-pinned, so upgrades require changing the image reference and revalidating the stack.
+Each `patches/*.py` file is a **full-file overlay** mounted read-only over its counterpart in the container; `compose.yaml` contains the target paths. The corresponding `diffs/*.patch` records the change from its upstream base. The custom kernels in `kernel-dev/hip-a8w4` are not upstream files: `gpt_oss_triton_kernels_moe.row-i8asym-candidate.py` JIT-builds them into `/opt/cj-moe` on first start. The base image remains digest-pinned, so upgrades require changing the image reference and revalidating the stack.
 
 | Overlay | Mounted over | Fixes | Needed when |
 | --- | --- | --- | --- |
-| `gpt_oss_triton_kernels_moe.pack128-fused-silu-fast-routing.py` | `vllm/.../fused_moe/experts/gpt_oss_triton_kernels_moe.py` | MXFP4 bitmatrix padding lanes + fused-SiLU grouped experts + fast DeepSeek routing | **Required** for the MXFP4 Triton path; the mask fix is [not yet upstream](https://github.com/doublewordai/vllm-amd-blog-doubleword/commit/c32932bb9ff6ad30b942e4835dd8b41601e7569e) |
-| `mxfp4.fused-silu.py` | `vllm/.../fused_moe/oracle/mxfp4.py` | Gate/up interleave layout for the fused-SiLU kernel | Required with the fused-SiLU overlay; skip both if you keep the standard SiLU path |
-| `triton-kernels-matmul-ogs-opt-flags.dsv4-mi300x.py` | `vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags.py` | `gfx942` MXFP4 OGS tile geometry (up to 1,536 routed rows) | **Performance** on `gfx942`; the stock geometry slows sharply above 768 routed rows |
+| `gpt_oss_triton_kernels_moe.row-i8asym-candidate.py` | `vllm/.../fused_moe/experts/gpt_oss_triton_kernels_moe.py` | MXFP4 padded-lane routing fix + row-asymmetric INT8 activations + dispatch to the custom gfx942 W1/W2 kernels | **Required** for the MoE path; the mask fix is [not yet upstream](https://github.com/doublewordai/vllm-amd-blog-doubleword/commit/c32932bb9ff6ad30b942e4835dd8b41601e7569e) |
+| `mxfp4.fused-silu.py` | `vllm/.../fused_moe/oracle/mxfp4.py` | Gate/up interleave layout for the fused-SiLU path | Required with the fused-SiLU overlay |
+| `triton-kernels-matmul-ogs-opt-flags.dsv4-mi300x.py` | `vllm/third_party/triton_kernels/matmul_ogs_details/opt_flags.py` | `gfx942` MXFP4 OGS tile geometry (up to 1,536 routed rows) | **Performance** on `gfx942`; stock geometry slows sharply above 768 routed rows |
 | `fused_compress_quant_cache.fnuz-shuffle.py` | `vllm/models/deepseek_v4/common/ops/fused_compress_quant_cache.py` | **FNUZ FP8 + 16×16 preshuffle** in the Lightning Indexer cache writer | **Required on MI300X**; MI325X/MI355X use OCP FP8 and must keep the stock bytes |
-| `aiter_pa_mqa_logits.i64.py` | `aiter/ops/triton/gluon/pa_mqa_logits.py` | 64-bit offsets in the `ChunkK=256` paged-MQA kernels | Required when KV offsets can exceed 4 GiB; skip for small KV pools |
-| `rocm_aiter_mla_sparse.prefill-bh64.py` | `vllm/v1/attention/ops/rocm_aiter_mla_sparse.py` | Deterministic `torch.topk` prefill + `BLOCK_H=64` head-512 sparse prefill | Determinism is required for reproducible tool calls; `BLOCK_H=64` is performance |
+| `aiter_pa_mqa_logits.i64.py` | `aiter/ops/triton/gluon/pa_mqa_logits.py` | 64-bit offsets in the `ChunkK=256` paged-MQA kernels | Required when KV offsets can exceed 4 GiB |
+| `rocm_aiter_mla_sparse.decode-h32-k16.py` | `vllm/v1/attention/ops/rocm_aiter_mla_sparse.py` | Decode tile 32 heads × 16 KV + canonical top-512 sort + OPUS prefill hook | **Required** (determinism) and **performance** |
 | `rocm_aiter_mla.dspark-causal.py` | `vllm/v1/attention/backends/mla/rocm_aiter_mla.py` | Causal multi-token speculative verification | Required for DSpark on ROCm small-head MLA — now [upstream](https://github.com/vllm-project/vllm/commit/77469c9057bec3212a64877dbbf3b9c48c22d786); the overlay is the upstream file verbatim |
-| `dspark-speculator.independent-draft-gumbel.py` + `spec-decode-utils.independent-draft-gumbel.py` | `vllm/v1/worker/gpu/spec_decode/dspark/speculator.py` + `.../spec_decode/utils.py` | Draft-proposal Gumbel noise salted away from rejection/recovery noise | Required only with `draft_sample_method=probabilistic` (the recipe's greedy path does not need it) |
+| `dspark-speculator.independent-draft-gumbel.py` + `spec-decode-utils.independent-draft-gumbel.py` | `vllm/v1/worker/gpu/spec_decode/dspark/speculator.py` + `.../spec_decode/utils.py` | Draft-proposal Gumbel noise salted away from rejection/recovery noise | Required only with `draft_sample_method=probabilistic` |
 | `kv_offload_cpu_gpu_worker.load-war.py` | `vllm/v1/kv_offload/cpu/gpu_worker.py` | Fence CPU→GPU KV restores behind in-flight compute ([#47282](https://github.com/vllm-project/vllm/issues/47282), [PR #47291](https://github.com/vllm-project/vllm/pull/47291)) | Required only with `--kv-offloading-backend native` |
+| `activation.rocm-exact-swiglu.py` | `vllm/model_executor/layers/activation.py` | Exact BF16 SwiGLU with `gate=min(gate,10)`, `up=clamp(up,-10,10)` via `swiglu_clamp.hip` | **Required** for checkpoint-faithful shared-expert output |
+| `scheduler.contention-aware.py` | `vllm/v1/core/sched/scheduler.py` | Full 3,712-token prefill quantum only when no other request can be delayed; 1,024-token chunks under contention | **Performance**; enables the 4,096-token budget without latency regressions |
+| `block_table.active-width-copy.py` | `vllm/v1/worker/block_table.py` | Copy only active block-table columns each decode step | **Performance** (decode; ~0.76 ms and 40 MB saved per M64 graph) |
+| `deepseek_v4_amd_model.router-bf16.py` | `vllm/models/deepseek_v4/amd/model.py` | Keep router logits in BF16 (removes 43 FP32 round-trips) | **Performance** (decode) |
+| `deepseek_v4_attention.wqb-bpreshuffle.py` + `deepseek_v4_rocm.wqb-bpreshuffle.py` | `vllm/models/deepseek_v4/attention.py` + `.../amd/rocm.py` | Preshuffle `wq_b` once at load instead of per request | **Performance** (prefill; ~9.5 ms per request) |
+| `cache_utils.gather2048.py` | `vllm/models/deepseek_v4/common/ops/cache_utils.py` | `BLOCK_K=2048` K-gather and global top-k index preparation | **Performance** (prefill) |
 
-### Two important correctness fixes
+Two further artifacts back the deterministic top-k path: `sampler.topk-tiebreak-sanitize.cu` (with `vllm-124154a-topk-tiebreak.patch`, its diff against the pinned image's `csrc/libtorch_stable/sampler.cu`) is the source of the compiled `_C_stable_libtorch` extension that `prepare-artifacts.sh` expands and mounts. `rocm_aiter_mla_sparse.topk-tiebreak.py` is a superseded pre-extension variant retained for audit.
 
-**MXFP4 routing.** The MoE bitmatrix kernel pads its block columns to a Triton block size, but the padding lanes were masked against the global tensor bound instead of the logical block size. Under load, padded lanes corrupted the routing matrix, causing near-match tool names and forgotten schemas on long prompts. The one-line fix is `mask = (offs_local < BLOCK_SIZE) & (offs_global < nonzero_indx_size)`, taken from [Doubleword commit `c32932bb9`](https://github.com/doublewordai/vllm-amd-blog-doubleword/commit/c32932bb9ff6ad30b942e4835dd8b41601e7569e). The overlay also includes fused-SiLU and fast-routing changes for grouped MXFP4 experts.
+### Three important correctness fixes
+
+**MXFP4 routing.** The MoE bitmatrix kernel pads its block columns to a Triton block size, but the padding lanes were masked against the global tensor bound instead of the logical block size. Under load, padded lanes corrupted the routing matrix, causing near-match tool names and forgotten schemas on long prompts. The one-line fix is `mask = (offs_local < BLOCK_SIZE) & (offs_global < nonzero_indx_size)`, taken from [Doubleword commit `c32932bb9`](https://github.com/doublewordai/vllm-amd-blog-doubleword/commit/c32932bb9ff6ad30b942e4835dd8b41601e7569e).
 
 **FP8 format.** DeepSeek V4's Lightning Indexer cache uses FP8. The stock writer emits OCP E4M3 bytes in row-major order, while AITER on MI300X consumes AMD FNUZ E4M3 bytes in a preshuffled 16×16 tile layout. In the worst case, interpreting one format as the other produces a factor-of-two scale error. The overlay selects `float8e4b8` with `FP8_MAX=224.0` and shuffled write offsets on ROCm, while leaving the OCP path unchanged elsewhere.
 
+**Expert activation clamps.** The checkpoint requires `gate=min(gate, 10)` and `up=clamp(up, -10, 10)` before the expert SwiGLU multiply (`swiglu_limit=10`). The first custom W1 kernel omitted both clamps; outlier activations changed logits and caused recurring `)Skip` tokens, rare unrelated CJK, and code-token errors. The W1 kernel and the shared-expert SwiGLU kernel now apply the clamps immediately before SiLU. A 61,440-token raw-completions regression (120 seeds × 512 tokens, native and DSpark-7) shows **0 `)Skip` and 0 stray CJK**; the previous kernel produced them in 3/120 responses. Full repro in [`CORRECTNESS-20260815.md`](CORRECTNESS-20260815.md).
+
 ### Speculative decoding
 
-This stack uses probabilistic drafting with block rejection. The two Gumbel overlays keep draft-proposal noise independent of rejection and recovery noise.
+This stack uses probabilistic drafting with block rejection. The two Gumbel overlays keep draft-proposal noise independent of rejection and recovery noise. Static K=7 is required at every concurrency: the checkpoint declares `dspark_block_size: 5`, so a dynamic band below five tokens is an unsupported Markov-head layout that can produce garbled output.
 
 ## Performance
 
-Key optimizations in the production configuration:
-
-| Change | Effect |
-| --- | --- |
-| Tune 21 recurring A8W8 GEMM shapes for 304-CU `gfx942` | +42–62% single/double-stream decode; +10–35% at 8–64 streams |
-| Fused SiLU, fast DeepSeek routing, batch-sensitive expert tiles | Native C1 decode 34.5 → 56.6 tok/s (+64%); routing kernel 42.6 → 11.9 µs/layer |
-| `BLOCK_H=64` sparse-prefill tile | Prefill reaches 7.9–8.5K tok/s; sparse-attention trace 317 → 142 ms per request |
-| Static K=7, probabilistic + block rejection, causal verify | 119.5 tok/s single-stream with correct output |
-| 2,048-token budget + 1,024-token long-prefill cap | Late short-request TTFT behind a 52K prefill: **8.2 s → 0.5 s** |
-| 20 GB GPU KV + 96 GiB CPU tier | 1.93M-token length-equivalent capacity; seven 256K requests admitted |
-
-### Final concurrency sweep
-
-Distinct ~400-word prompts, streaming, `temperature=1.0, top_p=0.95`; C1–C8 at 512 output tokens, C64 at 256:
-
-| Streams | Aggregate tok/s | Median per-stream decode | TTFT p50 |
-| ---: | ---: | ---: | ---: |
-| 1 | 126.2 | **168.6 tok/s** | 1.026 s |
-| 2 | 145.4 | 152.7 | 0.939 s |
-| 4 | 316.8 | 108.6 | 0.369 s |
-| 8 | 542.3 | 90.3 | 1.027 s |
-| 64 | 830.2 | 16.4 | 2.190 s |
-
-DSpark acceptance is prompt-dependent; treat these as gates for this exact image, not universal model benchmarks.
-
 ### Prefill
 
-With the tuned kernels, uncached prefill reaches **7.9–8.5K tok/s**, depending on scheduler budget: 7.90–7.99K at C1 with an 8,192-token budget and 8.46–8.51K at C4. The production profile uses a 2,048-token budget for latency isolation, giving 6,988–7,019 tok/s on fresh prompts. With the 1,024-token long-prefill cap, an 8.9K-token prompt reaches 5.20–5.29K tok/s at C1. In exchange, TTFT for a short request queued behind a 52K cold prefill drops from 8.2 s to 0.5 s. Warm recall of 380K cached tokens takes 0.64–2.65 s after a 120–125 s cold prefill.
+Uncached 8.9K-token prompts: the original deployment did **5.26K tok/s** at C1; the current profile does **11.69K tok/s** steady (11.53K median, **2.19×**). Milestones: contention-aware scheduler 6.96K → custom HIP MoE ~7.9K → attention/support stack 8.30K → asymmetric row-INT8 W1 8.99K → OPUS prefill ~9.36K → BM64/delta-scale W1 9.57K → batch 4,096 + M=3,712 tuning 10.97K → exact W2 11.09K → graph buckets + A8W8 ASM 11.24K → OPUS no-padding 11.39K → deterministic top-k 11.53K. Full chronology and rejected paths: [`PREFILL-EXPERIMENT-LOG-20260808-09.md`](PREFILL-EXPERIMENT-LOG-20260808-09.md), summary in [`PREFILL-OPTIMIZATION-20260809.md`](PREFILL-OPTIMIZATION-20260809.md).
+
+| Streams | Effective prefill tok/s |
+| ---: | ---: |
+| 1 | 11.66K |
+| 2 | 10.19K |
+| 4 | 11.20K |
+| 8 | 11.36K |
+
+### Decode
+
+Three decode rounds (reports: [`DECODE-OPTIMIZATION-20260812.md`](DECODE-OPTIMIZATION-20260812.md), [`DECODE-OPTIMIZATION-20260814.md`](DECODE-OPTIMIZATION-20260814.md), [`DECODE-OPTIMIZATION-20260815.md`](DECODE-OPTIMIZATION-20260815.md)) targeted the launch-bound low-concurrency regime. The retained work: adaptive BM16/BM64+BM48 MoE tiles ([`MOE-REWRITE-20260812.md`](MOE-REWRITE-20260812.md)), exact decode support fusions and the stable top-k extension (M64 graph 32.62 → 27.76 ms, −508 GPU operations), N-split W1/W2 kernels and decode-M GEMM rows for M≤8 (native C1 +10%), and mid-M GEMM rows for the C8+ verify and drafter range. Final corrected medians:
+
+| Concurrency | Native aggregate tok/s | Native tok/s/user | K7 aggregate tok/s | K7 tok/s/user | K7 accepted/draft |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 67.28 | 68.31 | 152.56 | 158.75 | 2.167 |
+| 2 | 123.48 | 63.45 | 207.00 | 132.86 | 1.703 |
+| 4 | 223.32 | 58.33 | 327.72 | 95.22 | 1.532 |
+| 8 | 393.02 | 53.83 | 510.46 | 79.80 | 1.558 |
+| 16 | 571.37 | 46.78 | 728.01 | 53.77 | 1.530 |
+| 32 | 1,079.08 | 37.91 | 975.62 | 36.98 | 1.485 |
+| 64 | 1,649.80 | 29.64 | 1,278.23 | 25.14 | 1.563 |
+
+These use a synthetic random-word workload whose acceptance is lower than production traffic; treat them as gates for this exact image, not universal model benchmarks.
+
+### Mixed load and context
+
+A 4,096-token budget with the contention-aware cap keeps cold prefills from stalling other streams: a ~52K cold prefill behind live decodes completes with a late-short-request TTFT of ~0.3 s and a maximum background decode gap of ~0.16 s. The stack serves 384K requests: 379K-token cold recalls complete in ~51–53 s (native) or 120–125 s (DSpark), warm recalls hit 379,904 cached tokens in 0.64–2.65 s with byte-identical output, and a 393,051-total-token request (165 below the limit) recalled all needles exactly. The 16 GB pool + 96 GiB tier reports a 1,945,846-token length-equivalent metric.
 
 ## Production notes
 
-- **HBM headroom is limited.** The warmed high-water mark is 204.5 of 205.8 GB. A 30 GB KV pool loads but fails during graph capture with `HSA_STATUS_ERROR_OUT_OF_RESOURCES`. Do not raise `--kv-cache-memory-bytes`; monitor HBM usage for growth.
-- **The CPU KV tier stores cache entries, not weights.** `--kv-offloading-size 96 --kv-offloading-backend native` maps ~103 GB in `/dev/shm` for evicted prefix-cache entries. The entrypoint removes stale mappings after crashes.
-- **The 1,664-token scheduler warning is expected.** DSpark-7 reserves draft slots from the 2,048-token budget. Raising the budget reserves more in-flight sliding-window state and reduces usable KV capacity.
-- **Warm the kernels after restart.** The first prefill initializes kernels and takes 5.3 s for 8.9K tokens; subsequent runs take 1.7 s. Run one uncached prefill before admitting traffic.
-- **Test correctness as well as throughput.** The validation suite includes two-turn tool-calling fixtures, a BFCL subset (74–76/90 exact calls), OpenCode tool-schema checks, and 380K-token needle recall on both native and DSpark paths. Cold and cached prefills can take different floating-point paths, so test both.
+- **HBM headroom is limited.** The validated high-water after 380K recall and C64 gates is ~199.9 of 205.8 GB (5.9 GB free). A 30 GB KV pool loads but fails during graph capture with `HSA_STATUS_ERROR_OUT_OF_RESOURCES`. Do not change the pool size without repeating the memory gates.
+- **Run `prepare-artifacts.sh` before every start.** It expands the compiled top-k extension and verifies its SHA-256; `sha256sum -c SHA256SUMS` verifies everything else. The first start JIT-compiles the gfx942 kernels, so cold recovery takes ~10 minutes; keep health checks tolerant of that window.
+- **AITER fallback messages are informational.** `shape ... not found tuned config ... will use default config` is benign: arbitrary prompt lengths create shapes outside the tables. `HSA_STATUS_ERROR`, OOM, tracebacks, or HTTP 5xx are not.
+- **The CPU tier is an opportunistic cache**, not scheduler capacity. The load-path fencing overlay must stay mounted; an unfenced restore can overwrite KV still read by in-flight compute.
+- **Keep raw-completions tests** because they isolate serving from chat encoding; the raw `/v1/completions` gate is what caught the activation-clamp bug.
 
-## License and provenance
+## Tuning reports
 
-The stack, documentation, and vLLM-derived overlays are Apache-2.0 (see `LICENSE`); the AITER-derived overlay keeps its MIT header. Upstream base revisions for every diff are recorded in [`patches/README.md`](patches/README.md). The model itself is [MIT-licensed](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731).
-
-## References
-
-All links verified 2026-08-04.
-
-- [DeepSeek-V4-Flash-0731 model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) — official release; 304B parameters; fused DSpark module; recommended `temperature=1.0, top_p=0.95`; MIT license
-- [Official vLLM DeepSeek V4 Flash recipe](https://recipes.vllm.ai/deepseek-ai/DeepSeek-V4-Flash) — reference launch configuration, DSpark (`num_speculative_tokens=7`), FP8 KV, block size 256, `deepseek_v4` parsers; AMD guidance for MI325X/MI355X
-- [Bringing up DeepSeek-V4-Flash on AMD MI300X](https://fergusfinn.com/blog/deepseek-v4-flash-mi300x/) (Fergus Finn, Doubleword, June 2026) — the bring-up worklog this repo builds on: FNUZ vs. OCP FP8, AITER gaps on `gfx942`, HIP-graph hazards, routing bugs
-- [doublewordai/vllm-amd-blog-doubleword](https://github.com/doublewordai/vllm-amd-blog-doubleword) — demo PRs for the above, including [commit `c32932bb9`](https://github.com/doublewordai/vllm-amd-blog-doubleword/commit/c32932bb9ff6ad30b942e4835dd8b41601e7569e) ("mask MXFP4 bitmatrix padding lanes by logical block size")
-- [vLLM commit `77469c9`](https://github.com/vllm-project/vllm/commit/77469c9057bec3212a64877dbbf3b9c48c22d786) — "[ROCm][MLA] Mask the AITER MLA small-head verify flatten causally (#50476)"
-- [vLLM issue #47282](https://github.com/vllm-project/vllm/issues/47282) — CPU-KV load path lacks cross-stream sync with compute (WAR gap)
-- [vLLM PR #47291](https://github.com/vllm-project/vllm/pull/47291) — proposed WAR fix, not merged; carried as an overlay here
-- [AMD Instinct MI300X](https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html) — 192 GB HBM3, 5.3 TB/s peak bandwidth, 2.61 PFLOPS peak FP8
-- [ROCm/AITER](https://github.com/ROCm/aiter) — AMD tuned-kernel library used for ROCm attention and dense linears
-- [vLLM](https://github.com/vllm-project/vllm) — the serving runtime (ROCm nightlies under `vllm/vllm-openai-rocm`)
+| Report | Contents |
+| --- | --- |
+| [`PREFILL-OPTIMIZATION-20260809.md`](PREFILL-OPTIMIZATION-20260809.md) | Final prefill profile, milestone medians, deterministic top-k, rejected paths |
+| [`PREFILL-EXPERIMENT-LOG-20260808-09.md`](PREFILL-EXPERIMENT-LOG-20260808-09.md) | Complete 5.26K→11.53K chronology with controlled A/Bs |
+| [`DECODE-OPTIMIZATION-20260812.md`](DECODE-OPTIMIZATION-20260812.md) | Decode round 1: sparse-attention tile, exact decode GEMM rows |
+| [`MOE-REWRITE-20260812.md`](MOE-REWRITE-20260812.md) | Adaptive BM16/BM64+BM48 MoE kernels and rejected architectures |
+| [`DECODE-OPTIMIZATION-20260814.md`](DECODE-OPTIMIZATION-20260814.md) | Decode round 2: fixed-graph ledger, exact support fusions (32.62→27.76 ms) |
+| [`DECODE-OPTIMIZATION-20260815.md`](DECODE-OPTIMIZATION-20260815.md) | Decode round 3: bit-exact low-concurrency N-split kernels and mid-M GEMM rows |
+| [`CORRECTNESS-20260815.md`](CORRECTNESS-20260815.md) | Expert-activation clamp bug: root cause, repro, corrected gates |
