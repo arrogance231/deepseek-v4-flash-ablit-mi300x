@@ -15,3 +15,4 @@ Caddyfile
 *.swp
 *.swo
 __pycache__/
+kernel-dev/hip-a8w4/*_hip.hip

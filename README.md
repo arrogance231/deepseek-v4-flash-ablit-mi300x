@@ -1,8 +1,10 @@
 # DeepSeek V4 Flash on a single AMD MI300X
 
-This repository contains the configuration and patches I use to run [`deepseek-ai/DeepSeek-V4-Flash-0731`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) on **one AMD MI300X** in production. It includes the Docker Compose stack, SHA-256-pinned file overlays, reference diffs against upstream, the JIT-compiled gfx942 kernel sources, and tuning tables. The checkpoint runs as shipped, without additional weight quantization or offload.
+This repository adapts the validated single-MI300X stack from [`ryanzhou/deepseek-v4-flash-mi300x`](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) for [`lovesenko/DeepSeek-V4-Flash-0731-Abliterated`](https://huggingface.co/lovesenko/DeepSeek-V4-Flash-0731-Abliterated). The abliterated checkpoint is a drop-in weight replacement for DeepSeek-V4-Flash-0731; the serving overlays and MI300X kernels remain from the reference stack. Model weights are downloaded separately and are never committed here.
 
-Results from the pinned stack (vLLM ROCm nightly `0.26.1rc1.dev229+g124154a88.rocm723`, AITER `0.1.19`):
+The default checkpoint revision is `61ec100749f5f05cd268296c5e2eccec03268e78`. The default serving profile is 393,216 tokens, matching the reference's validated single-card profile; set `MAX_MODEL_LEN` explicitly to select another limit.
+
+The table below is the upstream reference result from the pinned stack (vLLM ROCm nightly `0.26.1rc1.dev229+g124154a88.rocm723`, AITER `0.1.19`) before swapping in the abliterated checkpoint:
 
 | Metric | Result |
 | --- | ---: |
@@ -13,6 +15,8 @@ Results from the pinned stack (vLLM ROCm nightly `0.26.1rc1.dev229+g124154a88.ro
 | Context | 384K validated (393,216 tokens; the architecture supports 1M) |
 | GPU KV pool | 16 GB `fp8_ds_mla` (1.95M-token length-equivalent) + 96 GiB native CPU tier |
 | Weights in HBM | 156.67 GiB — **no additional quantization or weight offload** |
+
+With the abliterated checkpoint at the pinned revision above, the adapted stack was smoke-tested on this MI300X on 2026-08-27: model load succeeded, the OpenAI-compatible API stayed healthy, and a 512-token streamed chat request measured **100.91 decode tok/s** with **0.24 s TTFT**. This is a smoke measurement, not a full benchmark claim.
 
 The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the model reliably on MI300X required fixes for its FP8 format, MoE routing at high concurrency, the checkpoint's expert-activation clamps, causal speculative verification, CPU-KV synchronization, and a long campaign of prefill and decode kernel tuning. This repository collects those fixes, pins the versions used in production, and documents the tuning journey in dated reports (see [Tuning reports](#tuning-reports)).
 
@@ -82,19 +86,19 @@ One MI300X (`gfx942`, 304 CUs, ~192 GiB HBM), a working AMD kernel driver, recen
 
 ```bash
 VLLM_IMAGE='vllm/vllm-openai-rocm@sha256:e68d18b2ba50298661bfc49baf01158fbf036645c2362cccf3e8a7a79fe6c69a'
-MODEL='deepseek-ai/DeepSeek-V4-Flash-0731'
-REVISION='7872f01b1d1fe23eabc4c98b48bffcef5a386062'
+MODEL='lovesenko/DeepSeek-V4-Flash-0731-Abliterated'
+REVISION='61ec100749f5f05cd268296c5e2eccec03268e78'
 
 docker pull "$VLLM_IMAGE"
-docker run --rm --entrypoint hf \
-  -v /root/.cache/huggingface:/root/.cache/huggingface \
-  "$VLLM_IMAGE" download "$MODEL" --revision "$REVISION"
+MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated \
+  VLLM_IMAGE="$VLLM_IMAGE" MODEL_ID="$MODEL" MODEL_REVISION="$REVISION" \
+  ./scripts/download_model.sh
 ```
 
 ### 3. Prepare the files
 
 ```bash
-cp Caddyfile.example Caddyfile   # then set your hostname, email, and remote_ip CIDR
+cp Caddyfile.example Caddyfile   # optional: only needed for `--profile proxy`
 mkdir -p aiter-cache crash-dumps profiles-current
 chmod +x vllm-entrypoint.sh prepare-artifacts.sh
 ./prepare-artifacts.sh           # expands patches/_C_stable_libtorch.*.abi3.so
@@ -105,17 +109,17 @@ sha256sum -c SHA256SUMS        # verify every artifact before first start
 
 ```bash
 docker compose config -q
-docker compose up -d
+MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated docker compose up -d inference
 docker compose logs -f inference
 ```
 
 The first start JIT-compiles the gfx942 kernels and captures the graph set, so allow about ten minutes. A healthy start must show all of:
 
 ```text
-Model loading took 156.67 GiB
+Model loading took 156.47 GiB
 DSpark draft model loaded: 96 params
-GPU KV cache size: 1,945,846 tokens
-Maximum concurrency for 393,216 tokens per request: 4.95x
+GPU KV cache size: 1,283,701 tokens
+Maximum concurrency for 393,216 tokens per request: 3.26x
 Created mmap file /dev/shm/vllm_offload_...mmap (103.08 GB)
 Capturing CUDA graphs (FULL)
 Graph capturing finished ... took 6.47 GiB
@@ -131,7 +135,7 @@ HOST='your-host.example.com'
 curl -fsS "https://$HOST/v1/models"
 curl -sS "https://$HOST/v1/completions" \
   -H 'Content-Type: application/json' \
-  -d "{\"model\": \"deepseek-ai/DeepSeek-V4-Flash-0731\",
+  -d "{\"model\": \"lovesenko/DeepSeek-V4-Flash-0731-Abliterated\",
        \"prompt\": \"Calculate 17 * 23. Answer with the number only.\",
        \"temperature\": 0, \"max_tokens\": 32}"
 ```
