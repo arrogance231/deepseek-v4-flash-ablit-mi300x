@@ -2,6 +2,8 @@
 
 This repository adapts the validated single-MI300X stack from [`ryanzhou/deepseek-v4-flash-mi300x`](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) for [`lovesenko/DeepSeek-V4-Flash-0731-Abliterated`](https://huggingface.co/lovesenko/DeepSeek-V4-Flash-0731-Abliterated). The abliterated checkpoint is a drop-in weight replacement for DeepSeek-V4-Flash-0731; the serving overlays and MI300X kernels remain from the reference stack. Model weights are downloaded separately and are never committed here.
 
+Acknowledgement: thank you to Ryan Zhou for the upstream MI300X serving reference that this adaptation builds on. The abliterated-checkpoint adaptation, measurements, and documentation in this repository are maintained by **arrogance231**.
+
 The default checkpoint revision is `61ec100749f5f05cd268296c5e2eccec03268e78`. The default serving profile is 393,216 tokens, matching the reference's validated single-card profile; set `MAX_MODEL_LEN` explicitly to select another limit.
 
 The table below is measured on the **abliterated checkpoint** on this MI300X

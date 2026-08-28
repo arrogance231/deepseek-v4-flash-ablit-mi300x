@@ -13,8 +13,9 @@ services:
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
+    # Keep vLLM on host loopback; public access is through authenticated Caddy.
     ports:
-      - "${VLLM_PORT:-8000}:8000"
+      - "127.0.0.1:${VLLM_PORT:-8000}:8000"
     environment:
       VLLM_ROCM_USE_AITER: "1"
       VLLM_ROCM_OPUS_PREFILL: "1"
@@ -23,6 +24,7 @@ services:
       HSA_COREDUMP_PATTERN: /var/crash/vllm/gpucore.%p
       AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE: /opt/aiter-configs/dsv4-mi300x-a8w8-blockscale-bpreshuffle.csv
       DISABLE_DSPARK: "${DISABLE_DSPARK:-0}"
+      VLLM_API_KEY: "${VLLM_API_KEY:-}"
     volumes:
       # The checkpoint is downloaded outside the container and never copied into Git.
       - ${MODEL_DIR:-/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated}:/models/deepseek:ro
@@ -89,7 +91,7 @@ services:
       - --kv-offloading-backend
       - native
       - --max-num-seqs
-      - "64"
+      - "${MAX_NUM_SEQS:-8}"
       - --max-num-batched-tokens
       - "4096"
       - --long-prefill-token-threshold
@@ -127,6 +129,8 @@ services:
     profiles: [proxy]
     image: caddy@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
     restart: unless-stopped
+    environment:
+      VLLM_API_KEY: "${VLLM_API_KEY:-}"
     ports:
       - 443:443
     volumes:

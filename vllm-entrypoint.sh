@@ -19,8 +19,13 @@ for arg in sys.argv[1:]:
     if arg == "--speculative-config" or arg.startswith("--speculative-config."):
         continue
     args.append(arg)
+if os.environ.get("VLLM_API_KEY"):
+    args += ["--api-key", os.environ["VLLM_API_KEY"]]
 os.execvp("vllm", ["vllm", "serve", *args])
 PY
 fi
 
+if [ -n "${VLLM_API_KEY:-}" ]; then
+  set -- "$@" --api-key "$VLLM_API_KEY"
+fi
 exec vllm serve "$@"
