@@ -19,6 +19,10 @@ The same fixture without speculative decoding averaged 68.38 warm tok/s;
 `DISABLE_DSPARK=1` is available for a control restart, while the default
 `DISABLE_DSPARK=0` keeps DSpark enabled.
 
+Phase 4 quality gating found clean 2K and forced-5K prose, valid JSON/tool
+calls, but severe repetition when a single response is forced to 10K tokens;
+see [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md#phase-4--quality-and-stability-gate-completed).
+
 | Metric | Result |
 | --- | ---: |
 | Uncached C1 prefill | **~9.94K–11.40K tok/s** (14K–121K-token probes) |

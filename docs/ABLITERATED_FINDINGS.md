@@ -286,3 +286,29 @@ docker run --rm --device=/dev/kfd --device=/dev/dri --ipc=host \
 hidden-state MTP distillation remains research work; the serving API does not
 expose the target hidden states, so this phase does not claim to have trained
 the three MTP decoder blocks.
+
+## Phase 4 — quality and stability gate (completed)
+
+The production checkpoint was exercised with the same K=5/AITER/FP8-KV
+profile after the Phase 3 rollback. The gate uses
+`scripts/phase4_quality_gate.py`; generated text and JSON reports remain local
+under `results/raw/phase4-quality*` and are ignored by Git.
+
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| 2K natural prose | **PASS** | 2,000 tokens, 104.44 tok/s, no format leakage or obvious loop |
+| Forced 5K endurance | **PASS** | 5,000 tokens, 113.91 tok/s, 0.84% repeated 8-gram excess, no 32-token chunk loop |
+| Forced 10K endurance | **FAIL / DEGRADED** | 10,000 tokens, 156.78 tok/s, 43.91% repeated 8-gram excess and 42.14% repeated 12-gram excess; tail collapses into an `and ...` loop |
+| Natural 5K/10K request | **LIMITED** | Both stopped naturally around 1.6K tokens (`finish_reason=stop`) without leakage or loops |
+| Fixed seed, temperature 0 | **FAIL for exact replay** | Two identical requests differed under probabilistic DSpark drafting |
+| Structured JSON | **PASS** | Valid object with required `title`, `mood`, and three `beats` |
+| Forced tool call | **PASS** | Valid `lookup_weather` call with JSON argument `{"city":"Kyoto"}` |
+| Runtime stability | **PASS** | Container healthy after 5K and 10K runs; no OOM, NaN, or ROCm crash |
+
+The practical conclusion is that K=5 remains a good **single-scene/short
+chapter** profile and can sustain at least 5K forced tokens on this fixture.
+Forcing 10K tokens is not production-safe: the model enters a severe semantic
+loop even though the runtime remains healthy. Requests that need exact replay
+must use a deterministic drafting profile (greedy draft or DSpark disabled);
+the default probabilistic DSpark profile is intentionally optimized for
+throughput and does not guarantee byte-identical seeded text.
