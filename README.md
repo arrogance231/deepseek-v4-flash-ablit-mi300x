@@ -10,6 +10,15 @@ K setting, warmed server). It is not copied from the upstream reference
 project. Full methodology and the K-sweep data are in
 [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md).
 
+Phase 3A added a reversible target-generated calibration pilot for the tiny
+DSpark Markov head. It improved an offline held-out transition loss, but the
+live sidecar was slower (114.52 vs. 119.06 warm tok/s) and had lower accepted
+drafts (27.38% vs. 29.24%) on the same K=5 chat fixture. It is rejected and is
+not the production checkpoint; see the [Phase 3 findings](docs/ABLITERATED_FINDINGS.md#phase-3--target-generated-markov-head-calibration-completed-rejected).
+The same fixture without speculative decoding averaged 68.38 warm tok/s;
+`DISABLE_DSPARK=1` is available for a control restart, while the default
+`DISABLE_DSPARK=0` keeps DSpark enabled.
+
 | Metric | Result |
 | --- | ---: |
 | Uncached C1 prefill | **~9.94K–11.40K tok/s** (14K–121K-token probes) |

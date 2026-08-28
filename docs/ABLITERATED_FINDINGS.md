@@ -231,3 +231,58 @@ equivalence; Phase 4 still owns long-output and structured-output validation.
 `DS_NUM_SPECULATIVE_TOKENS=5|6|7` for reversible comparisons. Changing K
 requires a container restart and graph recapture; the checkpoint and weight
 files are unchanged.
+
+## Phase 3 — target-generated Markov-head calibration (completed: rejected)
+
+Phase 3A tested the smallest reversible draft-path intervention: the frozen
+abliterated target generated 16 original prose completions (3,072 output
+tokens, fixed seeds), and a standalone trainer updated only the two
+`mtp.2.markov_head` BF16 matrices. The three MTP decoder blocks, all target
+layers, tokenizer, and config remained unchanged. The calibration corpus is
+deliberately an experiment artifact under `results/raw/` and is not required
+to reproduce the server.
+
+The offline held-out transition cross-entropy improved from **9.0773** to
+**7.0171**, but that metric is not a target-model quality metric. The required
+live A/B used the identical chat prompt, sampler, seed, K=5, and four 512-token
+requests per checkpoint (first request treated as warm-up):
+
+| Variant | Warm-up-excluded mean tok/s | Median tok/s | Accepted/draft | Quality gate |
+| --- | ---: | ---: | ---: | --- |
+| Original abliterated MTP | **119.06** | 116.97 | **29.24%** | Pass |
+| Markov-calibrated sidecar | 114.52 | 115.71 | 27.38% | Pass, slower |
+
+As a separate control, the untouched checkpoint was restarted with the
+speculative flags removed by `DISABLE_DSPARK=1`. The no-draft path averaged
+**68.38 tok/s** after warm-up (55.62 tok/s on its first request), generated no
+draft tokens, and remained coherent. DSpark K=5 therefore adds about **74.1%**
+steady decode throughput on this fixture; the gain comes from accepted target
+tokens, not from changing the target weights. The production service is back
+on DSpark K=5 (`DISABLE_DSPARK=0`).
+
+The sidecar is therefore **rejected**: it is coherent but loses 3.8% of live
+decode throughput and draft acceptance. The production container was restored
+to `/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated`; the candidate is
+kept at `/mnt/model-storage/DeepSeek-V4-Flash-0731-Ablit-MarkovCalibrated` for
+future experiments and is never selected by default.
+
+Reproduce the pilot (inside the pinned vLLM image; stop inference while
+training so the GPU is free):
+
+```bash
+python3 scripts/collect_mtp_calibration_data.py --limit 16 --max-tokens 192
+docker run --rm --device=/dev/kfd --device=/dev/dri --ipc=host \
+  --entrypoint python -v "$PWD":/work \
+  -v /mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated:/models/deepseek:ro \
+  vllm/vllm-openai-rocm@sha256:e68d18b2ba50298661bfc49baf01158fbf036645c2362cccf3e8a7a79fe6c69a \
+  /work/scripts/train_markov_calibrator.py --checkpoint /models/deepseek \
+  --data /work/results/raw/phase3-mtp-calibration.jsonl \
+  --output /work/results/raw/phase3-markov-calibrated.safetensors
+```
+
+`export_markov_variant.py` creates a hard-linked/symlinked sidecar and
+`verify_markov_variant.py` confirms that exactly two tensors changed.
+`phase3_ab.py` records client throughput and vLLM DSpark counters. Full
+hidden-state MTP distillation remains research work; the serving API does not
+expose the target hidden states, so this phase does not claim to have trained
+the three MTP decoder blocks.

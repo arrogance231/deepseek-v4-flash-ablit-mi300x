@@ -22,6 +22,7 @@ services:
       ROCP_TOOL_ATTACH: "1"
       HSA_COREDUMP_PATTERN: /var/crash/vllm/gpucore.%p
       AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE: /opt/aiter-configs/dsv4-mi300x-a8w8-blockscale-bpreshuffle.csv
+      DISABLE_DSPARK: "${DISABLE_DSPARK:-0}"
     volumes:
       # The checkpoint is downloaded outside the container and never copied into Git.
       - ${MODEL_DIR:-/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated}:/models/deepseek:ro

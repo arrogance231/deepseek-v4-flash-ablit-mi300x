@@ -3,6 +3,10 @@ aiter-cache/
 crash-dumps/
 profiles-current/
 
+# Generated Phase-3 corpora, probe JSON, and calibrated sidecar weights.
+# These are reproducible local artifacts and must not enter the public repo.
+results/raw/
+
 # Expanded by prepare-artifacts.sh from artifacts/ (SHA-256 verified)
 /patches/_C_stable_libtorch*.so
 
