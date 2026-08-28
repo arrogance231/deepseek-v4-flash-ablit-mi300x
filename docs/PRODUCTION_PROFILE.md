@@ -1,0 +1,61 @@
+# Promoted production profile
+
+Phase 5 promotes the untouched abliterated checkpoint with the existing
+MI300X overlays. The rejected Phase-3 Markov sidecar is not part of this
+profile.
+
+```text
+model: /mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated
+max model length: 393,216 tokens
+weights: original checkpoint (FP8/MXFP4 as downloaded)
+DSpark: enabled, probabilistic, K=5
+KV: fp8_ds_mla, 16 GB GPU pool + 96 GiB native CPU tier
+AITER: enabled
+prefix caching: enabled
+chunked prefill: enabled
+MTP/draft sidecar: original checkpoint tensors
+```
+
+The profile is encoded in [`configs/production-k5.env`](../configs/production-k5.env).
+Start or recreate it with:
+
+```bash
+cd deepseek-v4-flash-ablit-mi300x
+set -a; source configs/production-k5.env; set +a
+docker compose up -d inference
+./scripts/check_production_profile.sh
+```
+
+The first start after a recreate performs model loading, kernel warm-up, and
+graph capture. A healthy start can take several minutes. The verification
+script checks the mounted checkpoint, DSpark K, `DISABLE_DSPARK`, API health,
+and model discovery.
+
+## Generation policy
+
+Phase 4 passed ordinary 2K prose and forced 5K output without an obvious
+loop. A forced 10K response collapsed into a severe semantic repetition loop,
+so callers should cap ordinary single responses at approximately **5,000
+completion tokens** and continue a chapter through explicit state/continuation
+requests. Do not set `ignore_eos` for production prose.
+
+The default probabilistic draft path is throughput-oriented and does not
+guarantee byte-identical output for repeated seeded requests. For exact replay
+or debugging, restart with `DISABLE_DSPARK=1`; the measured warm decode rate
+was 68.38 tok/s versus 119.06 tok/s with DSpark K=5.
+
+## Rollback
+
+The promotion is reversible. Keep `configs/production-k5.env` pointed at the
+original checkpoint. The calibrated candidate remains isolated at
+`/mnt/model-storage/DeepSeek-V4-Flash-0731-Ablit-MarkovCalibrated` and should
+only be selected explicitly for A/B work. To disable speculative decoding for
+a control run:
+
+```bash
+set -a; source configs/production-k5.env; set +a
+export DISABLE_DSPARK=1
+docker compose up -d inference
+```
+
+Restore DSpark by re-sourcing the profile and recreating the container.

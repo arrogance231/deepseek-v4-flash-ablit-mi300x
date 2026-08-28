@@ -23,6 +23,13 @@ Phase 4 quality gating found clean 2K and forced-5K prose, valid JSON/tool
 calls, but severe repetition when a single response is forced to 10K tokens;
 see [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md#phase-4--quality-and-stability-gate-completed).
 
+The Phase 5 promoted profile is frozen in
+[`configs/production-k5.env`](configs/production-k5.env), with a health and
+configuration check at [`scripts/check_production_profile.sh`](scripts/check_production_profile.sh)
+and operational guidance in [`docs/PRODUCTION_PROFILE.md`](docs/PRODUCTION_PROFILE.md).
+Use approximately 5K completion tokens per prose request; forced 10K output
+is known to enter a repetition loop.
+
 | Metric | Result |
 | --- | ---: |
 | Uncached C1 prefill | **~9.94K–11.40K tok/s** (14K–121K-token probes) |
