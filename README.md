@@ -45,6 +45,13 @@ checkpoint A/B tests and long-form evaluation; they cannot be inferred from
 the reference repository's synthetic tok/s table. The exact findings and
 next experiments are in [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md).
 
+The first draft-repair experiment is complete: restoring the original base
+MTP tensors created a valid loadable variant, but its apparent raw-completion
+speedup came with prompt-format leakage and repetition; normal chat returned
+to roughly 101–107 tok/s. That candidate was rejected and is not the active
+server. The staged repair plan and evidence are in
+[`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md#phase-plan-and-phase-1-result).
+
 The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the model reliably on MI300X required fixes for its FP8 format, MoE routing at high concurrency, the checkpoint's expert-activation clamps, causal speculative verification, CPU-KV synchronization, and a long campaign of prefill and decode kernel tuning. This repository collects those fixes, pins the versions used in production, and documents the tuning journey in dated reports (see [Tuning reports](#tuning-reports)).
 
 ---

@@ -143,3 +143,36 @@ throughput finding. It does **not** claim a complete creative-quality study,
 an accepted-token apples-to-apples benchmark, or a validated 1M production
 profile. Those require a matched harness and long-form quality fixtures and
 should be added as separate experiments rather than inferred from tok/s.
+
+## Phase plan and Phase 1 result
+
+The draft-repair work is staged so that a faster but corrupted output path
+cannot be promoted accidentally:
+
+1. **Phase 1 — reversible MTP A/B:** restore the original base MTP tensors
+   while leaving all abliterated decoder tensors unchanged. Gate on normal
+   chat quality, not raw-completion tok/s. **Completed: rejected.**
+2. **Phase 2 — static-K sweep:** compare K=5, K=6, and K=7 on the normal chat
+   endpoint with identical seeds and prompts. K below the declared block size
+   of five remains out of scope for the current ROCm path.
+3. **Phase 3 — MTP calibration:** freeze the abliterated target and distill
+   only the MTP/draft path against target-generated continuations. Keep this
+   as a sidecar variant and validate DSpark-on/off behavior.
+4. **Phase 4 — quality gate:** run longer chat generations, repetition checks,
+   fixed-seed parity, and tool/structured-output checks before any promotion.
+5. **Phase 5 — promotion:** retain the original MTP path unless a candidate
+   wins both speed and correctness gates.
+
+For Phase 1, the script
+[`scripts/restore_base_mtp.py`](../scripts/restore_base_mtp.py) created
+`/mnt/model-storage/DeepSeek-V4-Flash-0731-Ablit-MTPBase` using base revision
+`7872f01b1d1fe23eabc4c98b48bffcef5a386062`. The companion verifier checked all
+4,705 tensors and confirmed that exactly six MTP weight/scale tensors changed.
+
+The variant produced an apparent 357 tok/s on a degenerate raw-completion
+probe, with almost every draft token accepted. That output repeated entire
+paragraphs and leaked prompt-format instructions. On normal chat requests,
+the same variant measured 100.7, 105.8, and 107.3 tok/s and did not improve on
+the original abliterated-MTP path. It was therefore rejected and the live
+server was restored to the original checkpoint. This is precisely why speed
+must be gated by output quality and acceptance behavior on the intended API.
