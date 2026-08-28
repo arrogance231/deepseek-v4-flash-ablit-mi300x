@@ -4,20 +4,31 @@ This repository adapts the validated single-MI300X stack from [`ryanzhou/deepsee
 
 The default checkpoint revision is `61ec100749f5f05cd268296c5e2eccec03268e78`. The default serving profile is 393,216 tokens, matching the reference's validated single-card profile; set `MAX_MODEL_LEN` explicitly to select another limit.
 
-Important: the upstream table below is **not** a result for the abliterated
-weights. It is the reference result from the pinned stack before swapping in
-the checkpoint. The checkpoint-specific findings are recorded in
+The table below is measured on the **abliterated checkpoint** on this MI300X
+(normal `/v1/chat/completions` traffic, three 512-token streamed requests per
+K setting, warmed server). It is not copied from the upstream reference
+project. Full methodology and the K-sweep data are in
 [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md).
 
 | Metric | Result |
 | --- | ---: |
-| Uncached C1 prefill | **11.69K tok/s** steady (11.53K median; 2.19× the original 5.26K) |
-| Single-stream decode, static DSpark-7 | 152.6 tok/s aggregate, **158.8 tok/s median per stream** |
-| Native (non-speculative) C1 decode | 67.3 tok/s aggregate |
-| 64-stream burst | 1,278 tok/s aggregate (K7), no OOM, no engine errors |
-| Context | 384K validated (393,216 tokens; the architecture supports 1M) |
-| GPU KV pool | 16 GB `fp8_ds_mla` (1.95M-token length-equivalent) + 96 GiB native CPU tier |
-| Weights in HBM | 156.67 GiB — **no additional quantization or weight offload** |
+| Uncached C1 prefill | **~9.94K–11.40K tok/s** (14K–121K-token probes) |
+| Single-stream decode, static DSpark-K=5 | **115.6 tok/s mean**, 117.0 median (normal chat) |
+| Single-stream decode, static DSpark-K=6 | 113.9 tok/s mean, 112.4 median (normal chat) |
+| Single-stream decode, static DSpark-K=7 | 107.1 tok/s mean, 106.6 median (normal chat) |
+| 8-stream decode, static K=7 | 462.1 tok/s aggregate, 61.7 tok/s median/stream |
+| Context configured | 393,216 tokens (1M checkpoint ceiling not validated here) |
+| KV tier | 16 GB `fp8_ds_mla` GPU pool + 96 GiB native CPU tier |
+| Weights in HBM | 156.47 GiB — **no weight offload** |
+
+The current default is **K=5**, the fastest stable setting in this matched
+normal-chat sweep. Override it for an A/B run with
+`DS_NUM_SPECULATIVE_TOKENS=6` or `=7`; values below the checkpoint's declared
+DSpark block size of five are not supported by this ROCm path.
+
+For comparison only, the upstream original-checkpoint project reports 11.69K
+prefill tok/s and 152.6 tok/s single-stream K=7 on a synthetic workload. Those
+numbers remain reference context, not results for these abliterated weights.
 
 With the abliterated checkpoint at the pinned revision above, the adapted
 stack was smoke-tested on this MI300X on 2026-08-27: model load succeeded,
@@ -34,7 +45,7 @@ limitations, and the unanswered quality questions.
 
 This repository establishes a reproducible single-MI300X serving stack for
 the abliterated checkpoint, including the ROCm correctness overlays, tuned
-`gfx942` kernels, DSpark-7, prefix caching, chunked prefill, paged KV, and the
+`gfx942` kernels, static DSpark (K=5 default; K=5–7 tested), prefix caching, chunked prefill, paged KV, and the
 hybrid GPU/CPU KV tier. It also records the measured throughput after the
 weight swap.
 
@@ -73,7 +84,7 @@ MI300X (CDNA3) implements the AMD/Graphcore `fnuz` variant of E4M3, while MI325X
 This repository adds:
 
 1. **Correctness overlays** for the pinned ROCm nightly, including fixes not yet in upstream vLLM: the MXFP4 padded-lane routing fix, FNUZ FP8 indexer bytes, 64-bit paged-MQA offsets, deterministic sparse top-k, causal DSpark verification, and the restored DeepSeek expert-activation clamps.
-2. **A validated serving configuration** with probabilistic DSpark drafting, block rejection, and static K=7. A contention-aware scheduler gives a lone prefill the full 3,712-token quantum but caps long prefills at 1,024 tokens when other requests could be delayed.
+2. **A validated serving configuration** with probabilistic DSpark drafting, block rejection, and static K=5 (K=5–7 were measured; K=5 is the current normal-chat winner). A contention-aware scheduler gives a lone prefill the full 3,712-token quantum but caps long prefills at 1,024 tokens when other requests could be delayed.
 3. **Custom gfx942 kernels** (JIT-compiled at first start): row-asymmetric INT8 MoE W1/W2 with adaptive BM16/BM64+BM48 tiles and N-split low-concurrency variants, an exact BF16 SwiGLU+clamp kernel, an OPUS sparse-prefill kernel, and AITER GEMM tuning tables for the recurring `gfx942` shapes the packaged tables were missing.
 4. **A hybrid KV strategy**: 16 GB of `fp8_ds_mla` GPU cache + 96 GiB native CPU offload, with a load-path fencing fix that upstream [issue #47282](https://github.com/vllm-project/vllm/issues/47282) documents but [PR #47291](https://github.com/vllm-project/vllm/pull/47291) never merged.
 
@@ -105,7 +116,7 @@ The stack uses a digest-pinned official vLLM ROCm nightly with:
 - `--trust-remote-code` and the DeepSeek V4 tokenizer, reasoning, and tool parsers
 - `fp8_ds_mla` KV cache (UE8M0 block-scaled FP8, not generic unscaled FP8) with 256-token blocks, 16 GB GPU pool, and a 96 GiB `native` CPU offload tier
 - `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_OPUS_PREFILL=1`, and `--moe-backend triton`; AITER handles attention and dense linears, and the 256-expert/top-6 MoE shape dispatches to the custom gfx942 W1/W2 kernels with grouped Triton OGS as fallback
-- DSpark-7 speculative decoding with probabilistic drafting and block rejection
+- static DSpark speculative decoding with probabilistic drafting and block rejection (K=5 default; set `DS_NUM_SPECULATIVE_TOKENS` for K=6/7 A/B runs)
 - A 4,096-token scheduler budget (384 tokens reserved for DSpark, so ordinary prefills use up to 3,712) with the contention-aware long-prefill cap
 - full/breakable CUDA graph capture through M=3,712, giving one graph launch per token during steady decode
 - Caddy as an IP-allowlisted HTTPS proxy
@@ -208,7 +219,7 @@ Two further artifacts back the deterministic top-k path: `sampler.topk-tiebreak-
 
 ### Speculative decoding
 
-This stack uses probabilistic drafting with block rejection. The two Gumbel overlays keep draft-proposal noise independent of rejection and recovery noise. Static K=7 is required at every concurrency: the checkpoint declares `dspark_block_size: 5`, so a dynamic band below five tokens is an unsupported Markov-head layout that can produce garbled output.
+This stack uses probabilistic drafting with block rejection. The two Gumbel overlays keep draft-proposal noise independent of rejection and recovery noise. The tested static range is K=5–7; K=5 is the current default because it won the matched normal-chat sweep. The checkpoint declares `dspark_block_size: 5`, so values below five are an unsupported Markov-head layout that can produce garbled output.
 
 ## Performance
 

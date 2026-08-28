@@ -98,7 +98,7 @@ services:
       - --linear-backend
       - auto
       - --speculative-config.method=dspark
-      - --speculative-config.num-speculative-tokens=7
+      - --speculative-config.num-speculative-tokens=${DS_NUM_SPECULATIVE_TOKENS:-5}
       - --speculative-config.draft-sample-method=probabilistic
       - --speculative-config.rejection-sample-method=block
       - --compilation-config
