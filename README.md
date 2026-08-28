@@ -4,7 +4,10 @@ This repository adapts the validated single-MI300X stack from [`ryanzhou/deepsee
 
 The default checkpoint revision is `61ec100749f5f05cd268296c5e2eccec03268e78`. The default serving profile is 393,216 tokens, matching the reference's validated single-card profile; set `MAX_MODEL_LEN` explicitly to select another limit.
 
-The table below is the upstream reference result from the pinned stack (vLLM ROCm nightly `0.26.1rc1.dev229+g124154a88.rocm723`, AITER `0.1.19`) before swapping in the abliterated checkpoint:
+Important: the upstream table below is **not** a result for the abliterated
+weights. It is the reference result from the pinned stack before swapping in
+the checkpoint. The checkpoint-specific findings are recorded in
+[`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md).
 
 | Metric | Result |
 | --- | ---: |
@@ -16,7 +19,31 @@ The table below is the upstream reference result from the pinned stack (vLLM ROC
 | GPU KV pool | 16 GB `fp8_ds_mla` (1.95M-token length-equivalent) + 96 GiB native CPU tier |
 | Weights in HBM | 156.67 GiB — **no additional quantization or weight offload** |
 
-With the abliterated checkpoint at the pinned revision above, the adapted stack was smoke-tested on this MI300X on 2026-08-27: model load succeeded, the OpenAI-compatible API stayed healthy, and a 512-token streamed chat request measured **100.91 decode tok/s** with **0.24 s TTFT**. This is a smoke measurement, not a full benchmark claim.
+With the abliterated checkpoint at the pinned revision above, the adapted
+stack was smoke-tested on this MI300X on 2026-08-27: model load succeeded,
+the OpenAI-compatible API stayed healthy, and a 512-token streamed chat
+request measured **100.91 decode tok/s** with **0.24 s TTFT**. Repeated
+follow-up runs measured approximately **100.5–106.2 tok/s** with probabilistic
+DSpark-7; greedy DSpark was slower at approximately 89–93 tok/s. These are
+checkpoint-specific engineering measurements, not a claim that the
+abliterated model reproduces the reference's 152.6 tok/s. See
+[`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md) for methodology,
+limitations, and the unanswered quality questions.
+
+## What this repository establishes—and what it does not
+
+This repository establishes a reproducible single-MI300X serving stack for
+the abliterated checkpoint, including the ROCm correctness overlays, tuned
+`gfx942` kernels, DSpark-7, prefix caching, chunked prefill, paged KV, and the
+hybrid GPU/CPU KV tier. It also records the measured throughput after the
+weight swap.
+
+It does **not** claim that the abliterated checkpoint has the reference
+checkpoint's DSpark acceptance rate, that 1M context is production-quality,
+or that long-form narrative quality is unchanged. Those require matched
+checkpoint A/B tests and long-form evaluation; they cannot be inferred from
+the reference repository's synthetic tok/s table. The exact findings and
+next experiments are in [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md).
 
 The official vLLM recipe targets NVIDIA and newer AMD hardware. Running the model reliably on MI300X required fixes for its FP8 format, MoE routing at high concurrency, the checkpoint's expert-activation clamps, causal speculative verification, CPU-KV synchronization, and a long campaign of prefill and decode kernel tuning. This repository collects those fixes, pins the versions used in production, and documents the tuning journey in dated reports (see [Tuning reports](#tuning-reports)).
 

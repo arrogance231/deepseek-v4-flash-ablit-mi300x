@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+title: "DeepSeek V4 Flash on a single AMD MI300X"
+message: "If this serving stack or its measurements are useful, please cite the repository."
+type: software
+authors:
+  - family-names: "Arrogance231"
+    given-names: ""
+    website: "https://github.com/arrogance231"
+repository-code: "https://github.com/arrogance231/deepseek-v4-flash-ablit-mi300x"
+license: Apache-2.0
+date-released: 2026-08-28

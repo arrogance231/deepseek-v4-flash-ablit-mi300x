@@ -1,0 +1,17 @@
+DeepSeek V4 Flash MI300X serving stack
+
+Copyright 2026 the repository contributors.
+
+This repository contains serving configuration, runtime overlays, benchmark
+notes, and MI300X kernel sources. The Apache-2.0 license applies to this
+repository's original code and configuration only.
+
+Model checkpoints are downloaded separately and are not included in this
+repository. The checkpoint used for the measurements is
+lovesenko/DeepSeek-V4-Flash-0731-Abliterated at revision
+61ec100749f5f05cd268296c5e2eccec03268e78. Review MODEL_LICENSES.md and the
+upstream model card before downloading or redistributing it.
+
+This work adapts ideas and files from the upstream reference project listed
+in README.md. Upstream components retain their own copyright and license
+notices.
