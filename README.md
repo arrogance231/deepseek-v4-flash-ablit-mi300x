@@ -1,11 +1,10 @@
-# DeepSeek V4 Flash Abliterated on MI300X
+# DeepSeek V4 Flash DSpark Abliterated on MI300X
 
-This is a focused serving adaptation for the abliterated
-[`lovesenko/DeepSeek-V4-Flash-0731-Abliterated`](https://huggingface.co/lovesenko/DeepSeek-V4-Flash-0731-Abliterated)
-checkpoint on one AMD Instinct MI300X. The repository records what this
-checkpoint actually did under load: the runtime fixes, the measured decode
-and prefill behavior, the speculative-decoding experiments, and the limits
-we found. It is not a benchmark claim for the upstream weights.
+This is a focused serving adaptation for the gated, abliterated
+[`drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored`](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored)
+checkpoint on one AMD Instinct MI300X. The repository records the reproducible
+runtime configuration, ROCm overlays, and operational safeguards. It is not a
+benchmark claim for the upstream weights.
 
 The upstream [`ryanzhou/deepseek-v4-flash-mi300x`](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)
 project is acknowledged as the starting reference. This repository's
@@ -14,13 +13,13 @@ by **arrogance231**.
 
 ## Current answer
 
-The abliterated model is running on a single `gfx942` MI300X with the pinned
+The current checkpoint is running on a single `gfx942` MI300X with the pinned
 vLLM ROCm image. The operational profile is:
 
 | Setting | Value |
 | --- | --- |
-| Checkpoint | `lovesenko/DeepSeek-V4-Flash-0731-Abliterated` |
-| Revision | `61ec100749f5f05cd268296c5e2eccec03268e78` |
+| Checkpoint | `drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored` |
+| Revision | `324310d59474c45d33179ee9c175b21fb6611365` |
 | Context limit | `393,216` total tokens (the validated ~400K profile) |
 | Runtime | vLLM V1 ROCm `0.26.1rc1.dev229+g124154a88` |
 | Weights | Original FP8/MXFP4 checkpoint, no weight offload |
@@ -38,7 +37,12 @@ https://165.245.130.56.nip.io/v1
 It is protected by the API key configured outside Git. Do not put that key in
 this repository.
 
-## Measured behavior of the edited weights
+## Historical measurements
+
+The measurements below were made on the previously tested abliterated
+checkpoint and are retained as historical evidence for the runtime overlays.
+They are not results for the currently selected drowzeys checkpoint; run a
+new measurement before comparing model quality or throughput.
 
 These are matched, warmed normal-chat measurements on the abliterated
 checkpoint, not copied from the reference project's synthetic table:
@@ -118,7 +122,10 @@ and enough disk for the roughly 156 GiB checkpoint. One MI300X with about
 
 ```bash
 cd deepseek-v4-flash-ablit-mi300x
-export MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated
+export MODEL_ID=drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
+export MODEL_REVISION=324310d59474c45d33179ee9c175b21fb6611365
+export MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
+export HF_TOKEN=hf_your_token_here
 ./scripts/download_model.sh
 ```
 
@@ -163,7 +170,7 @@ For a minimal chat request:
 curl -sS https://165.245.130.56.nip.io/v1/chat/completions \
   -H "Authorization: Bearer $VLLM_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"lovesenko/DeepSeek-V4-Flash-0731-Abliterated",
+  -d '{"model":"deepseek-v4-flash",
        "messages":[{"role":"user","content":"Write a short scene."}],
        "temperature":0.8,"max_tokens":256}'
 ```
@@ -187,12 +194,13 @@ automatic prefix caching can reuse it.
 
 ## What is not claimed
 
-This repository does not claim that the abliterated checkpoint matches the
-upstream model's DSpark acceptance rate, that 1M context is production-ready,
-or that long-form prose quality is unchanged after abliteration. It also does
-not claim that a single tok/s number transfers between synthetic and normal
-chat workloads. Those questions need matched quality fixtures and remain
-open; the current operational recommendation is the validated ~400K profile.
+This repository does not claim that the current drowzeys checkpoint matches
+the historical checkpoint's DSpark acceptance rate, that 1M context is
+production-ready, or that long-form prose quality is unchanged after
+abliteration. It also does not claim that a single tok/s number transfers
+between synthetic and normal chat workloads. Those questions need matched
+quality fixtures and remain open; the current operational configuration is the
+validated ~400K profile.
 
 ## Further reading
 
@@ -202,5 +210,5 @@ open; the current operational recommendation is the validated ~400K profile.
   profile and rollback procedure.
 - [`MODEL_LICENSES.md`](MODEL_LICENSES.md) — checkpoint and upstream licenses.
 - [`patches/README.md`](patches/README.md) — overlay lineage and regeneration.
-- [DeepSeek V4 Flash model card](https://huggingface.co/lovesenko/DeepSeek-V4-Flash-0731-Abliterated)
+- [DeepSeek V4 Flash DSpark model card](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored)
   — checkpoint-specific usage and provenance.

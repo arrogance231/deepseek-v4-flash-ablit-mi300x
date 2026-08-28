@@ -1,11 +1,12 @@
 # Promoted production profile
 
-Phase 5 promotes the untouched abliterated checkpoint with the existing
-MI300X overlays. The rejected Phase-3 Markov sidecar is not part of this
+This profile serves the pinned drowzeys DSpark abliterated checkpoint with the
+existing MI300X overlays. The rejected Markov sidecar is not part of this
 profile.
 
 ```text
-model: /mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated
+model: /mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
+revision: 324310d59474c45d33179ee9c175b21fb6611365
 max model length: 393,216 tokens
 weights: original checkpoint (FP8/MXFP4 as downloaded)
 DSpark: enabled, probabilistic, K=5
@@ -46,8 +47,8 @@ was 68.38 tok/s versus 119.06 tok/s with DSpark K=5.
 
 ## Rollback
 
-The promotion is reversible. Keep `configs/production-k5.env` pointed at the
-original checkpoint. The calibrated candidate remains isolated at
+The promotion is reversible. Keep `configs/production-k5.env` pinned to the
+checkpoint above. The previous checkpoint remains isolated at
 `/mnt/model-storage/DeepSeek-V4-Flash-0731-Ablit-MarkovCalibrated` and should
 only be selected explicitly for A/B work. To disable speculative decoding for
 a control run:

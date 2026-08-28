@@ -7,6 +7,11 @@ PROFILE_FILE="${PROFILE_FILE:-configs/production-k5.env}"
 set -a
 # shellcheck disable=SC1090
 source "$PROFILE_FILE"
+# The real key remains in the ignored local .env; never commit or print it.
+if [[ -f .env ]]; then
+  # shellcheck disable=SC1091
+  source .env
+fi
 set +a
 
 container="${COMPOSE_PROJECT_NAME:-deepseek-v4-flash-ablit}-inference-1"
@@ -20,5 +25,10 @@ test "$mount" = "$MODEL_DIR" || { echo "FAIL: model mount=$mount (expected $MODE
 test "$container_k" = "$DS_NUM_SPECULATIVE_TOKENS" || { echo "FAIL: DSpark K=$container_k (expected $DS_NUM_SPECULATIVE_TOKENS)" >&2; exit 1; }
 test "$container_disable" = "$DISABLE_DSPARK" || { echo "FAIL: DISABLE_DSPARK=$container_disable (expected $DISABLE_DSPARK)" >&2; exit 1; }
 curl -fsS http://127.0.0.1:8000/health >/dev/null
-curl -fsS http://127.0.0.1:8000/v1/models >/dev/null
+if [[ -n "${VLLM_API_KEY:-}" ]]; then
+  curl -fsS http://127.0.0.1:8000/v1/models \
+    -H "Authorization: Bearer ${VLLM_API_KEY}" >/dev/null
+else
+  curl -fsS http://127.0.0.1:8000/v1/models >/dev/null
+fi
 echo "PASS: promoted profile is healthy (model=$MODEL_DIR K=$container_k DSpark=enabled)"
