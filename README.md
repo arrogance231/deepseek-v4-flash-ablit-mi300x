@@ -239,6 +239,20 @@ Three decode rounds (reports: [`DECODE-OPTIMIZATION-20260812.md`](DECODE-OPTIMIZ
 
 These use a synthetic random-word workload whose acceptance is lower than production traffic; treat them as gates for this exact image, not universal model benchmarks.
 
+For the abliterated checkpoint specifically, a matched live chat run (512
+requested tokens per stream, probabilistic DSpark-7, warmed server) measured:
+
+| Streams | Aggregate tok/s | Median tok/s per stream | Median TTFT |
+| ---: | ---: | ---: | ---: |
+| 1 | 102.8 | 103.9 | 0.052 s |
+| 2 | 147.4 | 87.7 | 0.997 s |
+| 4 | 266.5 | 76.0 | 0.494 s |
+| 8 | 462.1 | 61.7 | 0.173 s |
+
+These are checkpoint-specific client measurements, not replacements for the
+upstream synthetic table. Full methodology and acceptance deltas are in
+[`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md#multi-concurrency-result-on-the-active-checkpoint).
+
 ### Mixed load and context
 
 A 4,096-token budget with the contention-aware cap keeps cold prefills from stalling other streams: a ~52K cold prefill behind live decodes completes with a late-short-request TTFT of ~0.3 s and a maximum background decode gap of ~0.16 s. The stack serves 384K requests: 379K-token cold recalls complete in ~51–53 s (native) or 120–125 s (DSpark), warm recalls hit 379,904 cached tokens in 0.64–2.65 s with byte-identical output, and a 393,051-total-token request (165 below the limit) recalled all needles exactly. The 16 GB pool + 96 GiB tier reports a 1,945,846-token length-equivalent metric.

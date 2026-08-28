@@ -176,3 +176,26 @@ the same variant measured 100.7, 105.8, and 107.3 tok/s and did not improve on
 the original abliterated-MTP path. It was therefore rejected and the live
 server was restored to the original checkpoint. This is precisely why speed
 must be gated by output quality and acceptance behavior on the intended API.
+
+## Multi-concurrency result on the active checkpoint
+
+The active server was then tested with the same chat fixture at concurrency
+1, 2, 4, and 8. Each stream requested 512 tokens with probabilistic DSpark-7;
+prompts were given distinct stream suffixes and the server was warmed first.
+Throughput is measured at the client over the batch window, while per-stream
+tok/s excludes each stream's TTFT. The DSpark counters are deltas taken around
+each batch.
+
+| Streams | Aggregate tok/s | Median stream tok/s | Median TTFT | Accepted/draft counter ratio | Errors |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 102.8 | 103.9 | 0.052 s | 0.172 | 0 |
+| 2 | 147.4 | 87.7 | 0.997 s | 0.162 | 0 |
+| 4 | 266.5 | 76.0 | 0.494 s | 0.170 | 0 |
+| 8 | 462.1 | 61.7 | 0.173 s | 0.178 | 0 |
+
+The server remained healthy, used approximately 197.0 GB of 205.8 GB HBM at
+the post-run high-water, and used approximately 108 GiB of 235 GiB host RAM.
+This is useful serving capacity for several concurrent agents, but it is
+materially below the reference checkpoint's synthetic K7 aggregate table at
+the same stream counts. The abliterated checkpoint's low draft acceptance and
+the different workload remain the likely causes.
