@@ -9,22 +9,22 @@ model: /mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
 revision: 324310d59474c45d33179ee9c175b21fb6611365
 max model length: 524,288 tokens
 weights: original checkpoint (FP8/MXFP4 as downloaded)
-DSpark: enabled, probabilistic, K=5
+DSpark: enabled, probabilistic, K=7
 KV: fp8_ds_mla, 16 GB GPU pool + 96 GiB native CPU tier
 AITER: enabled
 prefix caching: enabled
 chunked prefill: enabled
 MTP/draft sidecar: original checkpoint tensors
-max concurrent sequences: 16
+max concurrent sequences: 64
 OpenAI tools: native `deepseek_v4` parser plus Hermes XML compatibility fallback
 ```
 
-The profile is encoded in [`configs/production-k5.env`](../configs/production-k5.env).
+The profile is encoded in [`configs/production-k7.env`](../configs/production-k7.env).
 Start or recreate it with:
 
 ```bash
 cd deepseek-v4-flash-ablit-mi300x
-set -a; source configs/production-k5.env; set +a
+set -a; source configs/production-k7.env; set +a
 docker compose up -d inference
 ./scripts/check_production_profile.sh
 ```
@@ -45,23 +45,24 @@ so callers should cap ordinary single responses at approximately **5,000
 completion tokens** and continue a chapter through explicit state/continuation
 requests. Do not set `ignore_eos` for production prose.
 
-The default probabilistic draft path is throughput-oriented and does not
+The default probabilistic K=7 draft path is throughput-oriented and does not
 guarantee byte-identical output for repeated seeded requests. For exact replay
 or debugging, restart with `DISABLE_DSPARK=1`; the measured warm decode rate
-was 68.38 tok/s versus 119.06 tok/s with DSpark K=5. The server's secret-free
+was measured with the earlier K=5 profile; benchmark K=7 separately before
+using it for throughput comparisons. The server's secret-free
 `request_complete` logs distinguish model EOS, length limits, stream loss, and
 client disconnects.
 
 ## Rollback
 
-The promotion is reversible. Keep `configs/production-k5.env` pinned to the
+The promotion is reversible. Keep `configs/production-k7.env` pinned to the
 checkpoint above. The previous checkpoint remains isolated at
 `/mnt/model-storage/DeepSeek-V4-Flash-0731-Ablit-MarkovCalibrated` and should
 only be selected explicitly for A/B work. To disable speculative decoding for
 a control run:
 
 ```bash
-set -a; source configs/production-k5.env; set +a
+set -a; source configs/production-k7.env; set +a
 export DISABLE_DSPARK=1
 docker compose up -d inference
 ```

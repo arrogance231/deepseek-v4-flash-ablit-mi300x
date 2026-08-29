@@ -32,7 +32,7 @@ boundary. Native one- and two-tool requests return complete OpenAI
 The DSpark A/B probe produced the same tool-call metadata and complete streams
 with `DISABLE_DSPARK=0` and `1`. The three-request probe completed without OOM,
 engine errors, or KV exhaustion. The server reports 1,549,376 GPU KV tokens and
-2.96x theoretical concurrency at a full 524K request; `MAX_NUM_SEQS=16` is a
+2.96x theoretical concurrency at a full 524K request; `MAX_NUM_SEQS=64` is a
 scheduler ceiling, not 16 simultaneous full-context allocations. Short probes
 used little KV capacity.
 

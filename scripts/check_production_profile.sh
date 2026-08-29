@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-PROFILE_FILE="${PROFILE_FILE:-configs/production-k5.env}"
+PROFILE_FILE="${PROFILE_FILE:-configs/production-k7.env}"
 set -a
 # shellcheck disable=SC1090
 source "$PROFILE_FILE"

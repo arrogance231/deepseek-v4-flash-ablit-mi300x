@@ -24,8 +24,8 @@ vLLM ROCm image. The operational profile is:
 | Runtime | vLLM V1 ROCm `0.26.1rc1.dev229+g124154a88` |
 | Weights | Original FP8/MXFP4 checkpoint, no weight offload |
 | KV | `fp8_ds_mla`, 16 GB HBM pool + 96 GiB native CPU tier |
-| Drafting | DSpark, probabilistic, K=5 |
-| Scheduling | paged KV, chunked prefill, prefix caching, up to 16 sequences |
+| Drafting | DSpark, probabilistic, K=7 |
+| Scheduling | paged KV, chunked prefill, prefix caching, up to 64 sequences |
 | Kernel path | AITER and the repository's `gfx942` overlays |
 
 When Caddy is configured, the public OpenAI-compatible endpoint is:
@@ -62,9 +62,10 @@ high-water was about 199.9 GB of 205.8 GB, so the cache and graph settings are
 intentionally conservative. A model-declared 1M position limit is not treated
 as a validated 1M narrative service.
 
-At K=5, probabilistic DSpark is the production choice. K=6 and K=7 are useful
+The active recipe uses probabilistic DSpark K=7; K=5 and K=6 remain useful
 A/B controls, while disabling DSpark gives a measured warm decode rate of
-68.38 tokens/s. Forced single responses beyond roughly 5K completion tokens
+68.38 tokens/s from the earlier control. Forced single responses beyond roughly
+5K completion tokens
 can enter a repetition loop; continue long chapters through explicit stateful
 requests instead of using `ignore_eos`.
 
@@ -148,8 +149,8 @@ graphs; a cold start can take several minutes. The tracked defaults include:
 
 ```text
 MAX_MODEL_LEN=524288
-MAX_NUM_SEQS=16
-DS_NUM_SPECULATIVE_TOKENS=5
+MAX_NUM_SEQS=64
+DS_NUM_SPECULATIVE_TOKENS=7
 DISABLE_DSPARK=0
 ```
 
@@ -231,7 +232,7 @@ configured 512K profile, not a claim of full 512K narrative validation.
 
 - [`docs/ABLITERATED_FINDINGS.md`](docs/ABLITERATED_FINDINGS.md) — measurements,
   phase results, and rejected experiments.
-- [`docs/PRODUCTION_PROFILE.md`](docs/PRODUCTION_PROFILE.md) — the promoted K=5
+- [`docs/PRODUCTION_PROFILE.md`](docs/PRODUCTION_PROFILE.md) — the promoted K=7
   profile and rollback procedure.
 - [`docs/STREAM_DIAGNOSTICS.md`](docs/STREAM_DIAGNOSTICS.md) — termination
   diagnosis, stream safeguards, and regression metadata.

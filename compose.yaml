@@ -99,7 +99,7 @@ services:
       - --kv-offloading-backend
       - native
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-16}"
+      - "${MAX_NUM_SEQS:-64}"
       - --max-num-batched-tokens
       - "4096"
       - --long-prefill-token-threshold
@@ -109,7 +109,7 @@ services:
       - --linear-backend
       - auto
       - --speculative-config.method=dspark
-      - --speculative-config.num-speculative-tokens=${DS_NUM_SPECULATIVE_TOKENS:-5}
+      - --speculative-config.num-speculative-tokens=${DS_NUM_SPECULATIVE_TOKENS:-7}
       - --speculative-config.draft-sample-method=probabilistic
       - --speculative-config.rejection-sample-method=block
       - --compilation-config

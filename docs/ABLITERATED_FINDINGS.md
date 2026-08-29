@@ -229,7 +229,7 @@ artifact observed in the rejected base-MTP raw-completion experiment. This
 is a throughput/quality smoke gate, not a claim of full creative-quality
 equivalence; Phase 4 still owns long-output and structured-output validation.
 
-`compose.yaml` now defaults to K=5 and accepts
+The active `configs/production-k7.env` profile uses K=7; the runtime accepts
 `DS_NUM_SPECULATIVE_TOKENS=5|6|7` for reversible comparisons. Changing K
 requires a container restart and graph recapture; the checkpoint and weight
 files are unchanged.
