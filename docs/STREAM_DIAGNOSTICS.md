@@ -63,6 +63,25 @@ API key in the log payload (Caddy redacts authorization).
    truncation rejection, and three concurrent requests. It is safe to run
    against either localhost or the authenticated public `/v1` endpoint.
 
+## Hermes custom-endpoint verification
+
+The deployed public endpoint is the endpoint reached by the Hermes-compatible
+OpenAI client: Caddy access records show `POST /v1/chat/completions` requests
+with the OpenAI Python client headers, and the corresponding vLLM records show
+`model=deepseek-v4-flash`, the configured tool-parser middleware, and
+`finish_event=true terminal_sse=true disconnected=None` for streamed calls.
+The mounted middleware and parser patches were loaded at the current container
+startup and are active in those requests.
+
+`custom` and `vllm-story` are client-side provider labels; neither is included
+in the OpenAI-compatible request, so the server cannot distinguish those labels
+from wire data alone. Correlate the client's `X-Request-ID` with
+`request_complete` when attributing a particular session. The observed short
+parent-like streamed responses ended with `finish_reason=stop` and
+`eos_source=likely_model_eos`, not an incomplete SSE response. Therefore the
+provider/runtime fix is active, but it correctly does not turn a legitimate
+model EOS into a continuation; no generic continuation heuristic is warranted.
+
 ## Regression metadata
 
 ```text
