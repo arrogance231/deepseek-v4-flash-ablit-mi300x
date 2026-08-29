@@ -61,6 +61,8 @@ services:
       # Native V4 DSML parser plus schema-gated fallbacks for Hermes'
       # <execute_code>/<write_file> wrappers when a client sends legacy forms.
       - ./patches/deepseek_v4_hermes_fallback.py:/usr/local/lib/python3.12/dist-packages/vllm/parser/deepseek_v4.py:ro
+      # Secret-free lifecycle logging and fail-closed stream termination.
+      - ./patches/request_diagnostics.py:/usr/local/lib/python3.12/dist-packages/vllm/request_diagnostics.py:ro
     entrypoint: [/opt/vllm-entrypoint.sh]
     command:
       - ${MODEL_PATH:-/models/deepseek}
@@ -80,6 +82,9 @@ services:
       - --tool-call-parser
       - deepseek_v4
       - --enable-auto-tool-choice
+      - --enable-request-id-headers
+      - --middleware
+      - vllm.request_diagnostics.DeepSeekDiagnosticsMiddleware
       - --enable-prompt-tokens-details
       - --kv-cache-dtype
       - fp8

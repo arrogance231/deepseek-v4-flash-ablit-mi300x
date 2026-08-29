@@ -21,10 +21,12 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import logging
 from typing import TYPE_CHECKING, Sequence
 
 import regex as re
 
+from vllm.entrypoints.openai.engine.protocol import ExtractedToolCallInformation
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
 _DSML = "｜DSML｜"
+logger = logging.getLogger("vllm.deepseek_v4_parser")
 
 # Some Hermes/local-model prompts make the model emit tool-specific XML
 # wrappers instead of the V4 DSML block. Keep native DSML as the primary path,
@@ -262,6 +265,37 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
     )
 
 
+def _incomplete_tool_markup(text: str, tools: list[Tool] | None) -> bool:
+    """Return true when output starts a tool envelope but never closes it.
+
+    ParserEngine.finish() intentionally flushes a partial call for streaming
+    UX. That is unsafe for a non-streaming OpenAI response: a length/EOS event
+    must never become an executable tool call. Reject only recognized tool
+    syntax, not arbitrary XML in ordinary assistant prose.
+    """
+    if not tools:
+        return False
+    if DSML_TOOL_START in text:
+        if DSML_TOOL_END not in text[text.find(DSML_TOOL_START):]:
+            return True
+        body = text[text.find(DSML_TOOL_START):]
+        if body.count(DSML_INVOKE_PREFIX) != body.count(DSML_INVOKE_END):
+            return True
+        if body.count("<" + _DSML + "parameter ") != body.count(DSML_PARAM_CLOSE):
+            return True
+    offered = {name for _, name in _HERMES_FALLBACK_OPENERS if self_name_in_tools(tools, name)}
+    for opener, name in _HERMES_FALLBACK_OPENERS:
+        if name in offered and opener in text:
+            start = text.find(opener)
+            if not any(close in text[start + len(opener):] for close in _HERMES_FALLBACK_CLOSERS[name]):
+                return True
+    return False
+
+
+def self_name_in_tools(tools: list[Tool], name: str) -> bool:
+    return find_tool_properties(tools, name) is not None
+
+
 class DeepSeekV4Parser(ParserEngine):
     def __init__(
         self,
@@ -387,11 +421,53 @@ class DeepSeekV4Parser(ParserEngine):
         return "".join(output), []
 
     def parse_delta(self, *args, **kwargs):
-        self._hermes_flush_pending = bool(kwargs.get("finished", False))
+        finished = bool(kwargs.get("finished", False))
+        parser_state = getattr(self._engine, "state", None)
+        incomplete = finished and (
+            parser_state in {
+                ParserState.TOOL_PREAMBLE,
+                ParserState.TOOL_ARGS,
+                ParserState.TOOL_NAME,
+                ParserState.TOOL_BETWEEN,
+            }
+            or self._hermes_tag_mode != "search"
+        )
+        self._hermes_flush_pending = finished
         try:
-            return super().parse_delta(*args, **kwargs)
+            result = super().parse_delta(*args, **kwargs)
+            if incomplete:
+                # Do not add another final tool delta after ParserEngine.flush;
+                # clients must not treat a length/EOS flush as a completed call.
+                logger.warning("Rejected incomplete streaming DeepSeek tool call")
+                return None
+            return result
         finally:
             self._hermes_flush_pending = False
+
+    def extract_tool_calls_from_content(self, content, request):
+        if _incomplete_tool_markup(content, self._tools):
+            logger.warning("Rejected incomplete non-streaming DeepSeek tool call")
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=None
+            )
+        return super().extract_tool_calls_from_content(content, request)
+
+    def finish_streaming(self):
+        if self._engine.state in {
+            ParserState.TOOL_PREAMBLE,
+            ParserState.TOOL_ARGS,
+            ParserState.TOOL_NAME,
+            ParserState.TOOL_BETWEEN,
+        } or self._hermes_tag_mode != "search":
+            logger.warning("Rejected incomplete streaming DeepSeek tool call")
+            return None
+        return super().finish_streaming()
+
+    def parse(self, model_output, request, *args, **kwargs):
+        if _incomplete_tool_markup(model_output, self._tools):
+            logger.warning("Rejected incomplete non-streaming DeepSeek tool call")
+            return None, None, None
+        return super().parse(model_output, request, *args, **kwargs)
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         result = _dsml_arg_converter(raw_args, partial)

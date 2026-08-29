@@ -28,10 +28,10 @@ vLLM ROCm image. The operational profile is:
 | Scheduling | paged KV, chunked prefill, prefix caching, up to 16 sequences |
 | Kernel path | AITER and the repository's `gfx942` overlays |
 
-The public OpenAI-compatible endpoint is:
+When Caddy is configured, the public OpenAI-compatible endpoint is:
 
 ```text
-https://165.245.130.56.nip.io/v1
+https://<your-public-host>/v1
 ```
 
 It is protected by the API key configured outside Git. Do not put that key in
@@ -161,14 +161,14 @@ Compose `proxy` profile on that host unless the host-level proxy is moved.
 
 ```bash
 ./scripts/check_production_profile.sh
-curl -sS https://165.245.130.56.nip.io/v1/models \
+curl -sS https://<your-public-host>/v1/models \
   -H "Authorization: Bearer $VLLM_API_KEY"
 ```
 
 For a minimal chat request:
 
 ```bash
-curl -sS https://165.245.130.56.nip.io/v1/chat/completions \
+curl -sS https://<your-public-host>/v1/chat/completions \
   -H "Authorization: Bearer $VLLM_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"deepseek-v4-flash",
@@ -179,6 +179,19 @@ curl -sS https://165.245.130.56.nip.io/v1/chat/completions \
 For Pi or another client, place stable story material first (system rules,
 world state, character state, then recent context and the changing request) so
 automatic prefix caching can reuse it.
+
+For a secret-free request/stream diagnostic (plain response, native tool call,
+truncation rejection, and three concurrent requests), run:
+
+```bash
+BASE_URL=https://<your-public-host>/v1 API_KEY="$VLLM_API_KEY" \
+  ./scripts/test_stream_integrity.py
+```
+
+The server logs one `request_complete` record per POST. It includes request ID,
+finish/stop metadata, generated-token count when usage is available, stream
+chunk/terminal status, and disconnect reason; prompts, arguments, and API keys
+are never logged.
 
 ## Runtime details worth preserving
 
@@ -194,7 +207,13 @@ automatic prefix caching can reuse it.
   `--enable-auto-tool-choice` and `--reasoning-parser deepseek_v4`. The mounted
   `patches/deepseek_v4_hermes_fallback.py` additionally converts legacy Hermes
   `<execute_code>` and `<write_file>`/`<write-files>` wrappers into standard
-  OpenAI `message.tool_calls` when those tools are present in the request.
+  OpenAI `message.tool_calls` when those tools are present in the request. A
+  truncated DSML/XML envelope is rejected rather than returned as an executable
+  tool call.
+- `patches/request_diagnostics.py` is mounted as vLLM middleware. It does not
+  enable vLLM prompt logging; it records lifecycle metadata and fails closed
+  with an explicit `error` finish before `[DONE]` if an upstream stream ends
+  without a terminal finish event.
 - The public key is intentionally absent from `.env.example`, Git history, and
   all benchmark artifacts.
 
@@ -214,6 +233,8 @@ configured 512K profile, not a claim of full 512K narrative validation.
   phase results, and rejected experiments.
 - [`docs/PRODUCTION_PROFILE.md`](docs/PRODUCTION_PROFILE.md) — the promoted K=5
   profile and rollback procedure.
+- [`docs/STREAM_DIAGNOSTICS.md`](docs/STREAM_DIAGNOSTICS.md) — termination
+  diagnosis, stream safeguards, and regression metadata.
 - [`MODEL_LICENSES.md`](MODEL_LICENSES.md) — checkpoint and upstream licenses.
 - [`patches/README.md`](patches/README.md) — overlay lineage and regeneration.
 - [DeepSeek V4 Flash DSpark model card](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored)

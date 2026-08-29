@@ -29,13 +29,21 @@ generated with `diff -u` on 2026-08-15 against:
 | `deepseek_v4_rocm.wqb-bpreshuffle.py` | `vllm-project/vllm` `main` @ `cb8104839c141609d99f1254459ef3a4f1bd4263` — `vllm/models/deepseek_v4/amd/rocm.py` |
 | `cache_utils.gather2048.py` | `vllm-project/vllm` `main` @ `cb8104839c141609d99f1254459ef3a4f1bd4263` — `vllm/models/deepseek_v4/common/ops/cache_utils.py` |
 | `scheduler.contention-aware.py` | `vllm-project/vllm` `main` @ `cb8104839c141609d99f1254459ef3a4f1bd4263` — `vllm/v1/core/sched/scheduler.py` |
-| `deepseek_v4_hermes_fallback.py` | pinned vLLM image `0.26.1rc1.dev229+g124154a88` — `vllm/parser/deepseek_v4.py`, with schema-gated Hermes XML fallback |
+| `deepseek_v4_hermes_fallback.py` | pinned vLLM image `0.26.1rc1.dev229+g124154a88` — `vllm/parser/deepseek_v4.py`, with schema-gated Hermes XML fallback and incomplete-call rejection |
+| `request_diagnostics.py` | local ASGI middleware for secret-free request/stream lifecycle diagnostics and fail-closed terminal SSE handling |
 
 `deepseek_v4_hermes_fallback.py` is mounted over the image's native
 `vllm/parser/deepseek_v4.py`. It preserves the recommended native V4 DSML
 parser and additionally converts Hermes `<execute_code>` and
 `<write_file>`/`<write-files>` wrappers into OpenAI tool calls when the matching
-function is included in the request.
+function is included in the request. Incomplete native or fallback envelopes are
+rejected instead of being exposed as executable calls.
+
+`request_diagnostics.py` logs request ID, request limits, finish/stop metadata,
+generated-token usage, stream chunk count, terminal-event status, and disconnect
+reason without logging prompts, tool arguments, or credentials. If the upstream
+application ends a stream without a finish event, it emits an `error` finish
+before `[DONE]` so clients can retry safely.
 
 The compiled stable-libtorch top-k extension is built from
 `sampler.topk-tiebreak-sanitize.cu`; `vllm-124154a-topk-tiebreak.patch`

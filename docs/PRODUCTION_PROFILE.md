@@ -33,7 +33,9 @@ The first start after a recreate performs model loading, kernel warm-up, and
 graph capture. A healthy start can take several minutes. The verification
 script checks the mounted checkpoint, DSpark K, `DISABLE_DSPARK`, API health,
 and model discovery. Tool clients must use `/v1/chat/completions` and include
-the OpenAI `tools` array.
+the OpenAI `tools` array. Run `scripts/test_stream_integrity.py` after a
+recreate to verify finish events, `[DONE]`, native tool JSON, truncation
+rejection, and a three-request concurrency probe.
 
 ## Generation policy
 
@@ -46,7 +48,9 @@ requests. Do not set `ignore_eos` for production prose.
 The default probabilistic draft path is throughput-oriented and does not
 guarantee byte-identical output for repeated seeded requests. For exact replay
 or debugging, restart with `DISABLE_DSPARK=1`; the measured warm decode rate
-was 68.38 tok/s versus 119.06 tok/s with DSpark K=5.
+was 68.38 tok/s versus 119.06 tok/s with DSpark K=5. The server's secret-free
+`request_complete` logs distinguish model EOS, length limits, stream loss, and
+client disconnects.
 
 ## Rollback
 
