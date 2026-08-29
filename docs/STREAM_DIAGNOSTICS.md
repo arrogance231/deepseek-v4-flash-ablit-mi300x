@@ -91,7 +91,15 @@ truncated DSML, max_tokens=16: finish=length, tool_calls=none
 HTTP/2 public stream: HTTP 200, text/event-stream, finish chunk=yes, [DONE]=yes
 ```
 
-The remaining short `finish_reason=stop` cases are model EOS by design. For a
-caller that explicitly requires a minimum-length prose continuation, use a
-request-scoped `min_tokens` (or a continuation request); do not set
-`ignore_eos` or a global minimum for tool calls.
+The endpoint now also normalizes DeepSeek V4 requests that omit
+`chat_template_kwargs`: it selects the reasoning template by default and
+respects explicit `thinking=false` / `reasoning_effort=none`. This is a
+model-specific provider compatibility fix, not a continuation heuristic.
+The normalizer is secret-free and records whether it injected the template
+selection in `request_complete` diagnostics.
+
+The remaining short `finish_reason=stop` cases after this normalization are
+still model EOS by design. For a caller that explicitly requires a
+minimum-length prose continuation, use a request-scoped `min_tokens` (or a
+continuation request); do not set `ignore_eos` or a global minimum for tool
+calls.

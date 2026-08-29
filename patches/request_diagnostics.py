@@ -29,6 +29,47 @@ def _header(scope: dict[str, Any], name: str) -> str | None:
     return None
 
 
+def _is_deepseek_v4_model(model: Any) -> bool:
+    value = model.strip().lower() if isinstance(model, str) else ""
+    return value.startswith("deepseek-v4")
+
+
+def _ensure_deepseek_v4_thinking(body: bytes) -> tuple[bytes, bool | None]:
+    """Select the V4 reasoning template when a client omitted it.
+
+    Hermes' ``custom`` provider historically sent ``reasoning_effort`` but
+    not vLLM's top-level ``chat_template_kwargs``.  V4 then rendered answer
+    mode and could emit EOS after a short, semantically incomplete prefix.
+    This is a model-specific request normalization, not a continuation or
+    minimum-token heuristic.  Explicit client settings always win.
+    """
+    try:
+        request = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return body, None
+    if not isinstance(request, dict) or not _is_deepseek_v4_model(request.get("model")):
+        return body, None
+
+    chat_kwargs = request.get("chat_template_kwargs")
+    if not isinstance(chat_kwargs, dict):
+        chat_kwargs = {}
+    if "thinking" in chat_kwargs:
+        return body, bool(chat_kwargs["thinking"])
+    if "enable_thinking" in chat_kwargs:
+        return body, bool(chat_kwargs["enable_thinking"])
+
+    thinking = request.get("reasoning_effort") != "none"
+    wire_thinking = request.get("thinking")
+    if isinstance(wire_thinking, dict) and wire_thinking.get("type") in {"enabled", "disabled"}:
+        thinking = wire_thinking["type"] == "enabled"
+    elif isinstance(wire_thinking, bool):
+        thinking = wire_thinking
+
+    chat_kwargs = {**chat_kwargs, "thinking": thinking}
+    request["chat_template_kwargs"] = chat_kwargs
+    return json.dumps(request, separators=(",", ":")).encode(), thinking
+
+
 def _request_summary(body: bytes) -> dict[str, Any]:
     try:
         request = json.loads(body)
@@ -52,6 +93,11 @@ def _request_summary(body: bytes) -> dict[str, Any]:
         "tool_choice": request.get("tool_choice") if isinstance(request.get("tool_choice"), str) else ("named" if isinstance(request.get("tool_choice"), dict) else None),
         "parallel_tool_calls": request.get("parallel_tool_calls"),
         "return_token_ids": bool(request.get("return_token_ids", False)),
+        "chat_template_thinking": (
+            request.get("chat_template_kwargs", {}).get("thinking")
+            if isinstance(request.get("chat_template_kwargs"), dict)
+            else None
+        ),
     }
 
 
@@ -125,6 +171,10 @@ class DeepSeekDiagnosticsMiddleware:
         response_id = request_id
         response_model: str | None = None
         body_parts: list[bytes] = []
+        request_body_delivered = False
+        passthrough_messages: list[dict[str, Any]] = []
+        request_buffer_size = 0
+        request_buffered_messages: list[dict[str, Any]] = []
         sse_pending = b""
         stream_chunks = 0
         finish_reason: Any = None
@@ -140,18 +190,46 @@ class DeepSeekDiagnosticsMiddleware:
 
         async def receive_wrapper():
             nonlocal captured_size, request_info, request_tools
-            message = await receive()
-            if message.get("type") == "http.request":
+            nonlocal request_body_delivered, request_buffer_size
+            if passthrough_messages:
+                return passthrough_messages.pop(0)
+            if request_body_delivered:
+                return await receive()
+
+            # Buffer the request body so the model-specific V4 template fix
+            # can be applied before vLLM parses the request.  Normal chat
+            # bodies are well below _MAX_CAPTURE. If a body exceeds that
+            # diagnostic cap, replay the original ASGI messages unchanged
+            # rather than accidentally forwarding only the captured prefix.
+            while True:
+                message = await receive()
+                if message.get("type") != "http.request":
+                    return message
+                request_buffered_messages.append(dict(message))
                 data = message.get("body", b"") or b""
+                request_buffer_size += len(data)
                 if captured_size < _MAX_CAPTURE:
                     keep = min(len(data), _MAX_CAPTURE - captured_size)
                     captured.append(data[:keep])
                     captured_size += keep
-                if not message.get("more_body", False) and not request_info:
-                    raw = b"".join(captured)
-                    request_info = _request_summary(raw)
-                    request_tools = _tool_requirements(raw)
-            return message
+                if request_buffer_size > _MAX_CAPTURE:
+                    request_body_delivered = True
+                    passthrough_messages.extend(request_buffered_messages[1:])
+                    return request_buffered_messages[0]
+                if message.get("more_body", False):
+                    continue
+
+                raw = b"".join(captured)
+                rewritten, thinking = _ensure_deepseek_v4_thinking(raw)
+                request_info = _request_summary(rewritten)
+                if thinking is not None:
+                    request_info["deepseek_v4_thinking_injected"] = rewritten != raw
+                request_tools = _tool_requirements(rewritten)
+                request_body_delivered = True
+                forwarded = dict(message)
+                forwarded["body"] = rewritten
+                forwarded["more_body"] = False
+                return forwarded
 
         def observe(value: dict[str, Any]) -> None:
             nonlocal response_id, response_model, finish_reason, stop_reason
@@ -299,7 +377,8 @@ class DeepSeekDiagnosticsMiddleware:
                 "stop_token_id=%s generated_token_count=%s eos_model_generated=%s "
                 "eos_source=%s server_forced=%s stream=%s stream_chunk_count=%s "
                 "finish_event=%s terminal_sse=%s disconnected=%s duration_ms=%d "
-                "tools_count=%s tool_digest=%s",
+                "tools_count=%s tool_digest=%s chat_template_thinking=%s "
+                "thinking_injected=%s",
                 request_id,
                 scope.get("path"),
                 response_status,
@@ -323,4 +402,6 @@ class DeepSeekDiagnosticsMiddleware:
                 int((time.monotonic() - started) * 1000),
                 request_info.get("tools_count"),
                 hashlib.sha256(json.dumps(sorted(request_tools), separators=(",", ":")).encode()).hexdigest()[:12] if request_tools else None,
+                request_info.get("chat_template_thinking"),
+                request_info.get("deepseek_v4_thinking_injected", False),
             )
