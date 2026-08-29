@@ -16,11 +16,12 @@ checkpoint's synthetic workload. The difference is real for this checkpoint;
 it is not evidence that the MI300X stack failed to load or that the reference
 number is fabricated.
 
-The current deployment is configured for **393,216 total tokens** (prompt plus
-completion). The checkpoint advertises 1,048,576 positions in `config.json`,
-but a 1M request has not been validated for quality or stability here. We
-therefore recommend 393K as the current operational ceiling and 1M as an
-experimental restart-only profile.
+The reproducible profile is configured for **524,288 total tokens** (prompt plus
+completion) and **16 concurrent sequences**. The 512K/16 profile is an operator
+configuration; the historical quality and memory measurements below were made
+at 393K/8 and should not be read as validation of full 512K utilization. The
+checkpoint advertises 1,048,576 positions in `config.json`, but a 1M request has
+not been validated for quality or stability here.
 
 ## What the reference repository did answer
 
@@ -71,7 +72,7 @@ smoke/engineering measurements, not as a new standardized leaderboard.
 | Greedy DSpark A/B | ~89–93 tok/s | Slower than probabilistic drafting on this checkpoint |
 | Uncached prefill | ~9.94K–11.40K tok/s | 14K–121K-token unique prompts |
 | Prefix-cache reuse | 1,536 tokens | Repeated stable prefix; second request reported cached tokens |
-| Current context flag | 393,216 | `--max-model-len`; includes output tokens |
+| Historical context flag | 393,216 | `--max-model-len`; includes output tokens |
 | GPU memory after long probes | 202.1 / 205.8 GB | Only about 3.7 GB free at the observed high-water |
 | Host memory | 108 / 235 GiB used | Swap remained essentially unused |
 
@@ -124,7 +125,8 @@ and quality check complete.
 ```bash
 cd deepseek-v4-flash-ablit-mi300x
 MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated \
-  MAX_MODEL_LEN=393216 \
+  MAX_MODEL_LEN=524288 \
+  MAX_NUM_SEQS=16 \
   docker compose up -d inference
 
 curl -sS http://127.0.0.1:8000/v1/chat/completions \

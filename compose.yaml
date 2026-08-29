@@ -58,6 +58,9 @@ services:
       - ./patches/kv_offload_cpu_gpu_worker.load-war.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/kv_offload/cpu/gpu_worker.py:ro
       # Use the full prefill quantum only when no other request can be delayed.
       - ./patches/scheduler.contention-aware.py:/usr/local/lib/python3.12/dist-packages/vllm/v1/core/sched/scheduler.py:ro
+      # Native V4 DSML parser plus schema-gated fallbacks for Hermes'
+      # <execute_code>/<write_file> wrappers when a client sends legacy forms.
+      - ./patches/deepseek_v4_hermes_fallback.py:/usr/local/lib/python3.12/dist-packages/vllm/parser/deepseek_v4.py:ro
     entrypoint: [/opt/vllm-entrypoint.sh]
     command:
       - ${MODEL_PATH:-/models/deepseek}
@@ -83,7 +86,7 @@ services:
       - --block-size
       - "256"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-393216}"
+      - "${MAX_MODEL_LEN:-524288}"
       - --kv-cache-memory-bytes
       - "16000000000"
       - --kv-offloading-size
@@ -91,7 +94,7 @@ services:
       - --kv-offloading-backend
       - native
       - --max-num-seqs
-      - "${MAX_NUM_SEQS:-8}"
+      - "${MAX_NUM_SEQS:-16}"
       - --max-num-batched-tokens
       - "4096"
       - --long-prefill-token-threshold

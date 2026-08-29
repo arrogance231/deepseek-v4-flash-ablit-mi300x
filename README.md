@@ -20,12 +20,12 @@ vLLM ROCm image. The operational profile is:
 | --- | --- |
 | Checkpoint | `drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored` |
 | Revision | `324310d59474c45d33179ee9c175b21fb6611365` |
-| Context limit | `393,216` total tokens (the validated ~400K profile) |
+| Context limit | `524,288` total tokens (configured 512K profile) |
 | Runtime | vLLM V1 ROCm `0.26.1rc1.dev229+g124154a88` |
 | Weights | Original FP8/MXFP4 checkpoint, no weight offload |
 | KV | `fp8_ds_mla`, 16 GB HBM pool + 96 GiB native CPU tier |
 | Drafting | DSpark, probabilistic, K=5 |
-| Scheduling | paged KV, chunked prefill, prefix caching, up to 8 sequences |
+| Scheduling | paged KV, chunked prefill, prefix caching, up to 16 sequences |
 | Kernel path | AITER and the repository's `gfx942` overlays |
 
 The public OpenAI-compatible endpoint is:
@@ -98,6 +98,7 @@ configs/                   frozen production environment profile
 scripts/download_model.sh resumable, revision-pinned model download
 scripts/check_production_profile.sh health/configuration gate
 patches/                   read-only vLLM/AITER overlays with provenance
+                          plus Hermes XML-to-DSML compatibility parser
 kernel-dev/hip-a8w4/       JIT-built MI300X kernels
 tuning/                    measured AITER tuning tables
 docs/ABLITERATED_FINDINGS.md
@@ -146,8 +147,8 @@ The first start builds or loads the MI300X kernels and captures the configured
 graphs; a cold start can take several minutes. The tracked defaults include:
 
 ```text
-MAX_MODEL_LEN=393216
-MAX_NUM_SEQS=8
+MAX_MODEL_LEN=524288
+MAX_NUM_SEQS=16
 DS_NUM_SPECULATIVE_TOKENS=5
 DISABLE_DSPARK=0
 ```
@@ -189,6 +190,11 @@ automatic prefix caching can reuse it.
   `patches/README.md` and `SHA256SUMS` to audit or regenerate them.
 - `DISABLE_DSPARK=1` is the correctness/replay control. It is slower but useful
   when diagnosing draft acceptance or seed behavior.
+- Native V4 tool calling uses `--tool-call-parser deepseek_v4` together with
+  `--enable-auto-tool-choice` and `--reasoning-parser deepseek_v4`. The mounted
+  `patches/deepseek_v4_hermes_fallback.py` additionally converts legacy Hermes
+  `<execute_code>` and `<write_file>`/`<write-files>` wrappers into standard
+  OpenAI `message.tool_calls` when those tools are present in the request.
 - The public key is intentionally absent from `.env.example`, Git history, and
   all benchmark artifacts.
 
@@ -199,8 +205,8 @@ the historical checkpoint's DSpark acceptance rate, that 1M context is
 production-ready, or that long-form prose quality is unchanged after
 abliteration. It also does not claim that a single tok/s number transfers
 between synthetic and normal chat workloads. Those questions need matched
-quality fixtures and remain open; the current operational configuration is the
-validated ~400K profile.
+quality fixtures and remain open; the current operational configuration is a
+configured 512K profile, not a claim of full 512K narrative validation.
 
 ## Further reading
 

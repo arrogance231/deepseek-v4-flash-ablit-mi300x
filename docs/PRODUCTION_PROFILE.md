@@ -7,7 +7,7 @@ profile.
 ```text
 model: /mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
 revision: 324310d59474c45d33179ee9c175b21fb6611365
-max model length: 393,216 tokens
+max model length: 524,288 tokens
 weights: original checkpoint (FP8/MXFP4 as downloaded)
 DSpark: enabled, probabilistic, K=5
 KV: fp8_ds_mla, 16 GB GPU pool + 96 GiB native CPU tier
@@ -15,6 +15,8 @@ AITER: enabled
 prefix caching: enabled
 chunked prefill: enabled
 MTP/draft sidecar: original checkpoint tensors
+max concurrent sequences: 16
+OpenAI tools: native `deepseek_v4` parser plus Hermes XML compatibility fallback
 ```
 
 The profile is encoded in [`configs/production-k5.env`](../configs/production-k5.env).
@@ -30,7 +32,8 @@ docker compose up -d inference
 The first start after a recreate performs model loading, kernel warm-up, and
 graph capture. A healthy start can take several minutes. The verification
 script checks the mounted checkpoint, DSpark K, `DISABLE_DSPARK`, API health,
-and model discovery.
+and model discovery. Tool clients must use `/v1/chat/completions` and include
+the OpenAI `tools` array.
 
 ## Generation policy
 
