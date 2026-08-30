@@ -12,7 +12,7 @@ request default stop strings: none
 request default min_tokens: 0
 request default ignore_eos: false
 server generation config: vllm (no model generation_config stop override)
-max_model_len: 393216
+max_model_len: 900000 (configured; validation pending)
 max_num_seqs: 16
 ```
 

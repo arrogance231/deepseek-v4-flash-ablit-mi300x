@@ -20,7 +20,7 @@ ROCm image (`vLLM 0.27.1+rocm723`). The operational profile is:
 | --- | --- |
 | Checkpoint | `windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated` |
 | Revision | `6de83db0be050e0338ae2f8376440642203ad90d` |
-| Context limit | `393,216` total tokens (validated recipe profile) |
+| Context limit | `900,000` configured (not yet validated on this MI300X) |
 | Runtime | vLLM V1 ROCm `0.27.1+rocm723` |
 | Weights | Original FP8/MXFP4 checkpoint, no weight offload |
 | KV | `fp8_ds_mla`, 16 GB HBM pool + 96 GiB native CPU tier |
@@ -224,7 +224,7 @@ production-ready, or that long-form prose quality is unchanged after
 abliteration. It also does not claim that a single tok/s number transfers
 between synthetic and normal chat workloads. Those questions need matched
 quality fixtures and remain open; the current operational configuration is a
-configured 384K profile, not a claim of full 384K narrative validation.
+configured 900K profile, not a claim of full 900K narrative validation. Validate memory, recall, latency, and stability before production.
 
 ## Further reading
 
