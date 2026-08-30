@@ -10,7 +10,7 @@ One MI300X VF (`gfx942`), vLLM `0.27.1+rocm723`, PyTorch
 `2.11.0+gitd0c8b1f`, HIP `7.2.53211`, Triton `3.6.0`; AITER and the
 MI300X overlays/custom kernels; DSpark K=7 with probabilistic drafting and
 block rejection; full/breakable graphs; prefix caching; 16 GB GPU KV plus
-96 GiB native CPU KV offload; `max_model_len=900000` is now configured in the repository; the completed validation run used 393216 and 900K remains unvalidated. `max_num_seqs=64`.
+96 GiB native CPU KV offload; `max_model_len=600000` is now configured in the repository; the completed validation run used 393216 and 600K remains unvalidated. `max_num_seqs=64`.
 Weights occupy approximately 156.47 GiB HBM.
 
 The reference repository's published image digest was unavailable from the

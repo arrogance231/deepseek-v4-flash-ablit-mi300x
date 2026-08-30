@@ -91,7 +91,7 @@ services:
       - --block-size
       - "256"
       - --max-model-len
-      - "${MAX_MODEL_LEN:-900000}"
+      - "${MAX_MODEL_LEN:-600000}"
       - --kv-cache-memory-bytes
       - "16000000000"
       - --kv-offloading-size
