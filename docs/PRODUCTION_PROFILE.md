@@ -1,12 +1,12 @@
 # Promoted production profile
 
-This profile serves the pinned drowzeys DSpark abliterated checkpoint with the
+This profile serves the exact windowsxp811203 DSpark abliterated checkpoint with the
 existing MI300X overlays. The rejected Markov sidecar is not part of this
 profile.
 
 ```text
-model: /mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
-revision: 324310d59474c45d33179ee9c175b21fb6611365
+model: /mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated
+revision: 6de83db0be050e0338ae2f8376440642203ad90d
 max model length: 524,288 tokens
 weights: original checkpoint (FP8/MXFP4 as downloaded)
 DSpark: enabled, probabilistic, K=7

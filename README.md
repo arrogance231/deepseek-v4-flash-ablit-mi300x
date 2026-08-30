@@ -1,7 +1,7 @@
 # DeepSeek V4 Flash DSpark Abliterated on MI300X
 
 This is a focused serving adaptation for the gated, abliterated
-[`drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored`](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored)
+[`windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated`](https://huggingface.co/windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated)
 checkpoint on one AMD Instinct MI300X. The repository records the reproducible
 runtime configuration, ROCm overlays, and operational safeguards. It is not a
 benchmark claim for the upstream weights.
@@ -13,15 +13,15 @@ by **arrogance231**.
 
 ## Current answer
 
-The current checkpoint is running on a single `gfx942` MI300X with the pinned
-vLLM ROCm image. The operational profile is:
+The tested checkpoint is configured on a single `gfx942` MI300X with the local
+ROCm image (`vLLM 0.27.1+rocm723`). The operational profile is:
 
 | Setting | Value |
 | --- | --- |
-| Checkpoint | `drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored` |
-| Revision | `324310d59474c45d33179ee9c175b21fb6611365` |
-| Context limit | `524,288` total tokens (configured 512K profile) |
-| Runtime | vLLM V1 ROCm `0.26.1rc1.dev229+g124154a88` |
+| Checkpoint | `windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated` |
+| Revision | `6de83db0be050e0338ae2f8376440642203ad90d` |
+| Context limit | `393,216` total tokens (validated recipe profile) |
+| Runtime | vLLM V1 ROCm `0.27.1+rocm723` |
 | Weights | Original FP8/MXFP4 checkpoint, no weight offload |
 | KV | `fp8_ds_mla`, 16 GB HBM pool + 96 GiB native CPU tier |
 | Drafting | DSpark, probabilistic, K=7 |
@@ -37,25 +37,21 @@ https://<your-public-host>/v1
 It is protected by the API key configured outside Git. Do not put that key in
 this repository.
 
-## Historical measurements
+## Measurements from the local abliterated checkpoint
 
-The measurements below were made on the previously tested abliterated
-checkpoint and are retained as historical evidence for the runtime overlays.
-They are not results for the currently selected drowzeys checkpoint; run a
-new measurement before comparing model quality or throughput.
-
-These are matched, warmed normal-chat measurements on the abliterated
-checkpoint, not copied from the reference project's synthetic table:
+These are measurements from the exact checkpoint and recipe adaptation used in
+this deployment, not copied from the reference project's official-model table:
 
 | Probe | Result |
 | --- | ---: |
-| Uncached prefill | ~9.94K–11.40K tokens/s (14K–121K-token prompts) |
-| Single-stream DSpark K=5 | 115.6 tokens/s mean, 117.0 median |
-| Single-stream DSpark K=6 | 113.9 tokens/s mean, 112.4 median |
-| Single-stream DSpark K=7 | 107.1 tokens/s mean, 106.6 median |
-| Eight-stream DSpark K=7 | 462.1 tokens/s aggregate, 61.7 per stream median |
-| Prefix reuse | 1,536 tokens reported on the repeated-prefix probe |
-| Long recall | 393,051 total-token request recalled all planted needles |
+| Target-only DSpark K=5 | ~32.4 tok/s on 600-token generation |
+| Recipe DSpark K=7 cold | 200.6 tok/s on 600 tokens |
+| Recipe DSpark K=7 warm | 280.6 / 280.3 tok/s on 600 tokens |
+| Warm tool calls | ~161–171 tok/s end-to-end |
+| EOS 1–500 | 20/20 reached 500; 0 premature EOS |
+| Required tool calls | 20/20 parsed correctly |
+| No-tool DSML leakage | 0/20 |
+| HBM high-water | ~197–200 GB of 205.8 GB |
 
 The model loads about 156.47 GiB of HBM for weights. The observed long-probe
 high-water was about 199.9 GB of 205.8 GB, so the cache and graph settings are
@@ -104,6 +100,8 @@ kernel-dev/hip-a8w4/       JIT-built MI300X kernels
 tuning/                    measured AITER tuning tables
 docs/ABLITERATED_FINDINGS.md
                           checkpoint-specific results and open questions
+docs/MEASUREMENTS-LOCAL-ABLITERATED.md
+                          measured 200–280 tok/s profile and correctness gate
 docs/PRODUCTION_PROFILE.md
                           start, rollback, and generation policy
 ```
@@ -124,9 +122,9 @@ and enough disk for the roughly 156 GiB checkpoint. One MI300X with about
 
 ```bash
 cd deepseek-v4-flash-ablit-mi300x
-export MODEL_ID=drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
-export MODEL_REVISION=324310d59474c45d33179ee9c175b21fb6611365
-export MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored
+export MODEL_ID=windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated
+export MODEL_REVISION=6de83db0be050e0338ae2f8376440642203ad90d
+export MODEL_DIR=/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated
 export HF_TOKEN=hf_your_token_here
 ./scripts/download_model.sh
 ```
@@ -148,7 +146,7 @@ The first start builds or loads the MI300X kernels and captures the configured
 graphs; a cold start can take several minutes. The tracked defaults include:
 
 ```text
-MAX_MODEL_LEN=524288
+MAX_MODEL_LEN=393216
 MAX_NUM_SEQS=64
 DS_NUM_SPECULATIVE_TOKENS=7
 DISABLE_DSPARK=0
@@ -172,7 +170,7 @@ For a minimal chat request:
 curl -sS https://<your-public-host>/v1/chat/completions \
   -H "Authorization: Bearer $VLLM_API_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"deepseek-v4-flash",
+  -d '{"model":"windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated",
        "messages":[{"role":"user","content":"Write a short scene."}],
        "temperature":0.8,"max_tokens":256}'
 ```
@@ -220,13 +218,13 @@ are never logged.
 
 ## What is not claimed
 
-This repository does not claim that the current drowzeys checkpoint matches
+This repository does not claim that the current windowsxp811203 checkpoint matches
 the historical checkpoint's DSpark acceptance rate, that 1M context is
 production-ready, or that long-form prose quality is unchanged after
 abliteration. It also does not claim that a single tok/s number transfers
 between synthetic and normal chat workloads. Those questions need matched
 quality fixtures and remain open; the current operational configuration is a
-configured 512K profile, not a claim of full 512K narrative validation.
+configured 384K profile, not a claim of full 384K narrative validation.
 
 ## Further reading
 
@@ -238,5 +236,5 @@ configured 512K profile, not a claim of full 512K narrative validation.
   diagnosis, stream safeguards, and regression metadata.
 - [`MODEL_LICENSES.md`](MODEL_LICENSES.md) — checkpoint and upstream licenses.
 - [`patches/README.md`](patches/README.md) — overlay lineage and regeneration.
-- [DeepSeek V4 Flash DSpark model card](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored)
+- [DeepSeek V4 Flash DSpark model card](https://huggingface.co/windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated)
   — checkpoint-specific usage and provenance.

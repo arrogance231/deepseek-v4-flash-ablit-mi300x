@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ID="${MODEL_ID:-drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored}"
-MODEL_REVISION="${MODEL_REVISION:-324310d59474c45d33179ee9c175b21fb6611365}"
-MODEL_DIR="${MODEL_DIR:-/mnt/model-storage/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored}"
+MODEL_ID="${MODEL_ID:-windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated}"
+MODEL_REVISION="${MODEL_REVISION:-6de83db0be050e0338ae2f8376440642203ad90d}"
+MODEL_DIR="${MODEL_DIR:-/mnt/model-storage/DeepSeek-V4-Flash-0731-Abliterated}"
 HF_CACHE_DIR="${HF_CACHE_DIR:-/root/.cache/huggingface}"
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai-rocm@sha256:e68d18b2ba50298661bfc49baf01158fbf036645c2362cccf3e8a7a79fe6c69a}"
+VLLM_IMAGE="${VLLM_IMAGE:-rocm:latest}"
 
 mkdir -p "$MODEL_DIR" "$HF_CACHE_DIR"
 echo "Downloading $MODEL_ID@$MODEL_REVISION to $MODEL_DIR"

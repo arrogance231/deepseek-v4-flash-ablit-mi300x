@@ -58,7 +58,7 @@ def assert_stream(name: str, payload: dict) -> None:
 
 
 def main() -> int:
-    base = {"model": "deepseek-v4-flash", "temperature": 0.0}
+    base = {"model": "windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated", "temperature": 0.0}
     assert_stream("plain", {**base, "messages": [{"role": "user", "content": "Explain TCP retransmission in detail."}], "max_tokens": 256})
 
     tool = {"type": "function", "function": {"name": "execute_code", "description": "run code", "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}}}

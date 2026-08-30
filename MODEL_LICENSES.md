@@ -5,8 +5,8 @@ The downloaded checkpoint is **not** part of this repository. Reproduce it with
 
 | Item | Value |
 | --- | --- |
-| Checkpoint | [`drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored`](https://huggingface.co/drowzeys/DeepSeek-V4-Flash-DSpark-Abliterated-Uncensored) |
-| Pinned revision | `324310d59474c45d33179ee9c175b21fb6611365` |
+| Checkpoint | [`windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated`](https://huggingface.co/windowsxp811203/DeepSeek-V4-Flash-0731-Abliterated) |
+| Pinned revision | `6de83db0be050e0338ae2f8376440642203ad90d` |
 | Model-card license | MIT (as displayed by Hugging Face on 2026-08-28) |
 | Upstream family | [`deepseek-ai/DeepSeek-V4-Flash-DSpark`](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-DSpark) |
 | Serving reference | [`ryanzhou/deepseek-v4-flash-mi300x`](https://github.com/ryanzhou/deepseek-v4-flash-mi300x) |
