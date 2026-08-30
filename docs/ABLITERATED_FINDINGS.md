@@ -42,7 +42,7 @@ null`, so numeric token IDs are not available through the OpenAI response.
 
 ## Interpretation
 
-These are startup/short-run results, not proof of multi-hour stability. The
+After restarting with `max_model_len=600000`, the service reached healthy state and a new 600-token deterministic probe measured 201.6 tok/s on the first request and 279.8 tok/s warm, with `finish_reason=stop`. These are startup/short-run results, not proof of multi-hour stability. The
 three-hour periodic soak must complete before making an uptime-degradation
 claim. A BF16 KV cache was rejected by the installed DeepSeek V4 path because
 its `fp8_ds_mla` layout requires an FP8 KV format. Disabling AITER was also
