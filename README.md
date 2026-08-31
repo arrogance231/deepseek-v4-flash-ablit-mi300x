@@ -9,7 +9,7 @@ benchmark claim for the upstream weights.
 The upstream [`ryanzhou/deepseek-v4-flash-mi300x`](https://github.com/ryanzhou/deepseek-v4-flash-mi300x)
 project is acknowledged as the starting reference. This repository's
 checkpoint adaptation, test results, and operational decisions are maintained
-by **arrogance231**.
+by **Arjhine Ty**.
 
 ## Current answer
 
