@@ -28,14 +28,6 @@ ROCm image (`vLLM 0.27.1+rocm723`). The operational profile is:
 | Scheduling | paged KV, chunked prefill, prefix caching, up to 64 sequences |
 | Kernel path | AITER and the repository's `gfx942` overlays |
 
-When Caddy is configured, the public OpenAI-compatible endpoint is:
-
-```text
-https://<your-public-host>/v1
-```
-
-It is protected by the API key configured outside Git. Do not put that key in
-this repository.
 
 ## Measurements from the local abliterated checkpoint
 
